@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CRUCIBLE // Tactical Command Simulation</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --steel-dark: #10161f;
+        --steel-mid: #1e2835;
+        --steel-light: #2d3b4e;
+        --steel-border: #475b72;
+        --steel-border-light: #64748b;
+        --amber: #f59e0b;
+        --amber-light: #fbbf24;
+        --amber-glow: rgba(245, 158, 11, 0.45);
+        --cyan: #06b6d4;
+        --cyan-light: #38bdf8;
+        --green: #22c55e;
+        --red: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #04060a; }
+      body {
+        color: #e2e8f0;
+        font-family: "Lucida Console", "Courier New", monospace, system-ui, sans-serif;
+        font-size: 13px;
+        user-select: none;
+      }
+
+      /* --- Soft Vignette (Clear & Non-Dimming) --- */
+      .crt-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(circle at 50% 50%, transparent 75%, rgba(0, 0, 0, 0.4) 100%);
+        z-index: 20;
+      }
+
+      /* --- C&C Steel Military Panels (Brightened & Crisp) --- */
+      .steel {
+        background: linear-gradient(180deg, #253342 0%, #1a2430 60%, #131b24 100%);
+        border: 1.5px solid var(--steel-border);
+        box-shadow:
+          inset 1px 1px 0 rgba(255, 255, 255, 0.18),
+          inset -1px -1px 0 rgba(0, 0, 0, 0.6),
+          0 4px 16px rgba(0, 0, 0, 0.7);
+        color: #f1f5f9;
+      }
+      .steel-title {
+        font-size: 10.5px;
+        letter-spacing: 0.22em;
+        font-weight: 700;
+        color: var(--amber-light);
+        text-transform: uppercase;
+        padding: 5px 8px;
+        border-bottom: 1.5px solid var(--steel-border);
+        background: rgba(0, 0, 0, 0.45);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .steel-title::before {
+        content: "";
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        background: var(--amber);
+        border-radius: 1px;
+        box-shadow: 0 0 6px var(--amber-glow);
+      }
+
+      #view {
+        display: block;
+        position: absolute;
+        inset: 0;
+        cursor: crosshair;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+
+      /* --- Top Tactical Command Bar --- */
+      #topbar {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        right: 252px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 8px 16px;
+        border-radius: 3px;
+        z-index: 10;
+      }
+      #topbar .title-box {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .command-emblem {
+        position: relative;
+        width: 18px;
+        height: 18px;
+        display: inline-block;
+        border: 2px solid var(--amber);
+        background: #1b252b;
+        box-shadow: inset 0 0 0 2px #0a0e10, 0 0 6px var(--amber-glow);
+        image-rendering: pixelated;
+      }
+      .command-emblem::before,
+      .command-emblem::after {
+        content: "";
+        position: absolute;
+        background: var(--amber);
+      }
+      .command-emblem::before { width: 6px; height: 6px; left: 4px; top: 4px; }
+      .command-emblem::after { width: 2px; height: 14px; left: 6px; top: 0; opacity: 0.45; }
+
+      #topbar .title {
+        font-weight: 900;
+        letter-spacing: 0.22em;
+        color: var(--amber);
+        font-size: 15px;
+        text-shadow: 0 0 10px var(--amber-glow);
+      }
+      #topbar .opp { color: #cbd5e1; font-weight: 700; }
+      #topbar .spacer { flex: 1; }
+      #topbar .res { display: flex; align-items: baseline; gap: 6px; }
+      #topbar .res .k { font-size: 10px; letter-spacing: 0.15em; color: #94a3b8; text-transform: uppercase; font-weight: 700; }
+      #ore { color: var(--amber-light); font-weight: 900; font-size: 16px; min-width: 44px; text-align: right; text-shadow: 0 0 8px var(--amber-glow); }
+      #income { color: #4ade80; font-size: 11px; font-weight: 700; }
+      #power-res { display: flex; align-items: baseline; gap: 5px; }
+      #power-used { font-weight: 800; font-size: 15px; color: #38bdf8; min-width: 24px; text-align: right; }
+      #power-total { font-weight: 800; font-size: 15px; color: #94a3b8; }
+      .pwr-indicator {
+        display: inline-block;
+        width: 9px;
+        height: 12px;
+        background: #fde047;
+        clip-path: polygon(60% 0%, 0% 55%, 45% 55%, 35% 100%, 100% 45%, 55% 45%);
+        vertical-align: -1px;
+        filter: drop-shadow(0 0 4px rgba(253, 224, 71, 0.7));
+      }
+      #power-res.low-power #power-used { color: #ef4444; text-shadow: 0 0 8px rgba(239, 68, 68, 0.7); }
+      #power-res.low-power .pwr-indicator {
+        background: #ef4444;
+        filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.9));
+        animation: power-pulse 0.7s infinite alternate;
+      }
+      @keyframes power-pulse {
+        0% { opacity: 0.3; transform: scale(0.85); }
+        100% { opacity: 1; transform: scale(1.15); }
+      }
+      #turn { color: var(--cyan-light); font-weight: 700; font-size: 14px; }
+
+      /* --- Right Command Sidebar --- */
+      #sidebar {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: 236px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px;
+        border-radius: 3px;
+        z-index: 10;
+      }
+      #sel-card { border-radius: 2px; flex: 0 0 auto; }
+      #sel-card .body { padding: 8px 10px; min-height: 60px; }
+      #sel-name { font-weight: 800; color: #ffffff; letter-spacing: 0.08em; font-size: 12px; }
+      #sel-detail { color: #cbd5e1; font-size: 11px; margin-top: 3px; line-height: 1.4; }
+      .hpwrap { margin-top: 6px; height: 7px; background: #090d12; border: 1px solid #334155; border-radius: 1px; overflow: hidden; }
+      .hpwrap > div { height: 100%; background: linear-gradient(180deg, #4ade80, #16a34a); }
+      .queue { margin-top: 6px; font-size: 11px; color: #e2e8f0; }
+      .queue-bar { height: 5px; background: #090d12; border-radius: 1px; margin-top: 3px; overflow: hidden; border: 1px solid #334155; }
+      .queue-bar > div { height: 100%; background: var(--amber); }
+
+      #cmd-menu { border-radius: 2px; flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; }
+      
+      /* --- Command Tool Actions Bar (Repair / Sell) --- */
+      #cmd-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        padding: 6px 8px 6px;
+        background: rgba(10, 15, 22, 0.7);
+        border-bottom: 1.5px solid var(--steel-border);
+      }
+      .tool-btn {
+        background: linear-gradient(180deg, #2d3b4e 0%, #1a2430 100%);
+        border: 1.5px solid var(--steel-border);
+        border-radius: 2px;
+        color: #ffffff;
+        padding: 5px 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        box-shadow: inset 1px 1px 0 rgba(255,255,255,0.15), inset -1px -1px 0 rgba(0,0,0,0.6);
+        transition: all 0.12s ease;
+      }
+      .tool-btn:hover {
+        border-color: var(--amber);
+        background: linear-gradient(180deg, #3d4f66 0%, #243242 100%);
+        filter: brightness(1.15);
+      }
+      .tool-btn .tool-icon {
+        width: 22px;
+        height: 22px;
+        object-fit: contain;
+        display: block;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+      .tool-btn.armed {
+        border-color: var(--amber);
+        background: linear-gradient(180deg, #78350f 0%, #451a03 100%);
+        box-shadow: 0 0 8px var(--amber-glow), inset 1px 1px 0 rgba(255,255,255,0.25);
+        color: var(--amber-light);
+      }
+      /* --- End Turn (full-width row in the action bar) --- */
+      #action-end-turn {
+        grid-column: 1 / -1;
+        background: linear-gradient(180deg, #7a5a12 0%, #3f2d06 100%);
+        border-color: var(--amber);
+        color: var(--amber-light);
+        font-size: 12px;
+        padding: 8px 8px;
+        letter-spacing: 0.14em;
+      }
+      #action-end-turn.armed {
+        box-shadow: 0 0 10px var(--amber-glow), inset 1px 1px 0 rgba(255,255,255,0.3);
+        animation: endturn-pulse 1.1s infinite alternate;
+      }
+      @keyframes endturn-pulse {
+        0% { box-shadow: 0 0 4px var(--amber-glow), inset 1px 1px 0 rgba(255,255,255,0.25); }
+        100% { box-shadow: 0 0 14px var(--amber-glow), inset 1px 1px 0 rgba(255,255,255,0.3); }
+      }
+      #action-end-turn:disabled {
+        opacity: 0.55;
+        cursor: default;
+        animation: none;
+      }
+      #action-repair.armed {
+        border-color: #38bdf8;
+        background: linear-gradient(180deg, #0e7490 0%, #155e75 100%);
+        box-shadow: 0 0 8px rgba(56, 189, 248, 0.6), inset 1px 1px 0 rgba(255,255,255,0.25);
+        color: #e0f2fe;
+      }
+
+      /* --- 4-Tab Icon Navigation Bar --- */
+      #cmd-tabs {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 5px;
+        padding: 6px 8px 6px;
+        background: rgba(0, 0, 0, 0.45);
+        border-bottom: 1.5px solid var(--steel-border);
+      }
+      .cmd-tab-btn {
+        background: linear-gradient(180deg, #253344 0%, #151f2b 100%);
+        border: 1.5px solid var(--steel-border);
+        border-radius: 2px;
+        padding: 6px 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        position: relative;
+        box-shadow: inset 1px 1px 0 rgba(255,255,255,0.12), inset -1px -1px 0 rgba(0,0,0,0.5);
+        transition: all 0.12s ease;
+      }
+      .cmd-tab-btn .tab-icon {
+        width: 28px;
+        height: 28px;
+        object-fit: contain;
+        display: block;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+      .cmd-tab-btn:hover {
+        border-color: var(--amber);
+        background: linear-gradient(180deg, #384b63 0%, #1f2d3d 100%);
+      }
+      .cmd-tab-btn.active {
+        border-color: var(--amber);
+        background: linear-gradient(180deg, #445b77 0%, #253547 100%);
+        box-shadow: 0 0 8px var(--amber-glow), inset 0 -3px 0 var(--amber);
+      }
+
+      #cmd-menu .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        padding: 8px;
+      }
+      .cmd {
+        position: relative;
+        background: linear-gradient(180deg, #334252 0%, #202b37 100%);
+        border: 1.5px solid var(--steel-border);
+        border-radius: 2px;
+        color: #ffffff;
+        box-shadow: inset 1px 1px 0 rgba(255,255,255,0.18), inset -1px -1px 0 rgba(0,0,0,0.6);
+        padding: 6px 4px 20px;
+        cursor: pointer;
+        text-align: center;
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 5px;
+      }
+      .cmd:hover { border-color: var(--amber); background: linear-gradient(180deg, #42556a 0%, #293847 100%); filter: brightness(1.15); }
+      .cmd.armed { border-color: var(--amber); box-shadow: 0 0 10px var(--amber-glow), inset 1px 1px 0 rgba(255,255,255,0.25); }
+      .cmd.disabled { opacity: 0.38; cursor: default; }
+      .cmd.disabled:hover { border-color: var(--steel-border); background: linear-gradient(180deg, #334252 0%, #202b37 100%); filter: none; }
+      .cmd .thumb {
+        width: 48px;
+        height: 48px;
+        object-fit: contain;
+        display: block;
+        border-radius: 2px;
+        border: 1.5px solid #475569;
+        background: #020617;
+        box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+      .cmd .label { font-size: 10px; margin-top: 1px; }
+      .cmd .cost {
+        position: absolute;
+        right: 5px;
+        bottom: 3px;
+        font-size: 10px;
+        color: var(--amber-light);
+        font-weight: 800;
+      }
+      .cmd .power-tag {
+        position: absolute;
+        left: 5px;
+        bottom: 3px;
+        font-size: 9.5px;
+        font-weight: 800;
+      }
+      .cmd .power-tag.pos { color: #38bdf8; text-shadow: 0 0 4px rgba(56, 189, 248, 0.5); }
+      .cmd .power-tag.neg { color: #f59e0b; }
+      #cmd-empty { padding: 12px; color: #94a3b8; font-size: 11px; line-height: 1.5; text-align: center; }
+
+      /* --- Radar Panel --- */
+      #radar-block { border-radius: 2px; flex: 0 0 auto; margin-top: auto; }
+      #radar-wrap { padding: 4px; display: flex; justify-content: center; }
+      #radar {
+        display: block;
+        width: 216px;
+        height: 216px;
+        background: #070b10;
+        border: 1.5px solid var(--steel-border);
+        border-radius: 2px;
+        box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9);
+        cursor: crosshair;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+
+      /* --- Tactical Event Log --- */
+      #log {
+        position: absolute;
+        bottom: 8px;
+        left: 8px;
+        width: 330px;
+        border-radius: 3px;
+        z-index: 10;
+        pointer-events: auto;
+      }
+      #log .body {
+        padding: 6px 8px;
+        font-size: 11px;
+        max-height: 125px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .log-entry {
+        display: flex;
+        align-items: baseline;
+        gap: 5px;
+        line-height: 1.35;
+        font-family: monospace;
+        font-size: 10.5px;
+      }
+      .log-time {
+        color: #64748b;
+        font-size: 10px;
+        flex-shrink: 0;
+      }
+      .log-tag {
+        font-size: 8.5px;
+        font-weight: 700;
+        padding: 0 4px;
+        border-radius: 2px;
+        text-transform: uppercase;
+        flex-shrink: 0;
+        letter-spacing: 0.4px;
+        line-height: 1.4;
+      }
+      .log-tag-prod { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); }
+      .log-tag-warn { background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+      .log-tag-danger { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.45); }
+      .log-tag-kill { background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); }
+      .log-tag-info { background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
+
+      .log-msg { color: #cbd5e1; word-break: break-word; }
+      .log-msg-prod { color: #bae6fd; }
+      .log-msg-warn { color: #fef08a; font-weight: 600; }
+      .log-msg-danger { color: #fca5a5; font-weight: 600; }
+      .log-msg-kill { color: #a7f3d0; }
+      .log-msg-info { color: #94a3b8; }
+
+      /* --- Tooltip --- */
+      #tooltip {
+        position: absolute;
+        pointer-events: none;
+        z-index: 30;
+        background: #0f172a;
+        border: 1px solid var(--cyan);
+        border-radius: 2px;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: #f8fafc;
+        display: none;
+        white-space: nowrap;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+      }
+
+      /* --- Spectator Replay Bar --- */
+      #spectate-bar {
+        position: absolute;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 8px 14px;
+        border-radius: 3px;
+        z-index: 10;
+      }
+      #spectate-bar input[type="range"] { width: 220px; accent-color: var(--amber); }
+
+      /* --- Buttons --- */
+      .btn {
+        background: linear-gradient(180deg, #3d4e61 0%, #24313e 100%);
+        border: 1.5px solid #556980;
+        color: #ffffff;
+        border-radius: 2px;
+        box-shadow: inset 1px 1px 0 rgba(255,255,255,0.18), inset -1px -1px 0 rgba(0,0,0,0.6);
+        padding: 8px 14px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .btn:hover { border-color: var(--amber); color: var(--amber-light); filter: brightness(1.18); box-shadow: 0 0 8px var(--amber-glow); }
+      .btn:disabled { opacity: 0.4; cursor: default; }
+      .btn:disabled:hover { border-color: #556980; color: #ffffff; filter: none; box-shadow: none; }
+
+      /* --- Main Menu / Overlay --- */
+      #overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(circle at 50% 50%, rgba(4, 7, 11, 0.3) 0%, rgba(4, 7, 11, 0.72) 100%);
+        z-index: 40;
+      }
+      .panel {
+        background: rgba(22, 31, 42, 0.94);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 2px solid #556980;
+        border-radius: 4px;
+        padding: 24px 34px;
+        max-width: 540px;
+        text-align: center;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.85), inset 0 0 20px rgba(0, 0, 0, 0.4);
+      }
+      .live-feed-badge {
+        position: absolute;
+        top: 16px;
+        left: 20px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        letter-spacing: 0.15em;
+        color: #cbd5e1;
+        background: rgba(15, 23, 32, 0.85);
+        border: 1px solid #475569;
+        padding: 4px 10px;
+        border-radius: 2px;
+      }
+      .rec-dot {
+        width: 8px;
+        height: 8px;
+        background: #ef4444;
+        border-radius: 50%;
+        box-shadow: 0 0 8px #ef4444;
+        animation: blink 1.2s infinite;
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.2; }
+      }
+      .logo-box {
+        margin-bottom: 18px;
+        border-bottom: 2px solid #334155;
+        padding-bottom: 14px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .crucible-emblem {
+        width: 100%;
+        max-width: 380px;
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 18px;
+        margin-bottom: 8px;
+        background: #141a21;
+        border: 2px solid #3d4b5a;
+        box-shadow: inset 0 4px 0 rgba(245, 158, 11, 0.22), inset 0 -4px 0 rgba(0, 0, 0, 0.45), 0 0 14px rgba(245, 158, 11, 0.22);
+        image-rendering: pixelated;
+      }
+      .emblem-mark {
+        display: grid;
+        place-items: center;
+        width: 20px;
+        height: 20px;
+        color: var(--amber);
+        border: 2px solid var(--amber);
+        background: #252d32;
+        font-weight: 900;
+        line-height: 1;
+      }
+      .emblem-word {
+        color: var(--amber);
+        font-family: Impact, "Arial Black", monospace, sans-serif;
+        font-size: clamp(1.45rem, 5vw, 2.1rem);
+        font-weight: 900;
+        letter-spacing: 0.22em;
+        text-shadow: 2px 2px 0 #78350f;
+      }
+      .logo-title {
+        font-size: 2.2rem;
+        font-weight: 900;
+        letter-spacing: 0.38em;
+        color: var(--amber-light);
+        text-shadow: 0 0 14px var(--amber-glow);
+        margin: 0;
+      }
+      .logo-sub {
+        font-size: 10px;
+        letter-spacing: 0.25em;
+        color: #cbd5e1;
+        text-transform: uppercase;
+        margin-top: 4px;
+        font-weight: 700;
+      }
+      .panel .row {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      .hidden { display: none !important; }
+      .win { color: var(--green); text-shadow: 0 0 10px rgba(34, 197, 94, 0.5); }
+      .lose { color: var(--red); text-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
+      .draw { color: var(--amber); text-shadow: 0 0 10px rgba(234, 179, 8, 0.5); }
+      .panel.wide { max-width: 800px; text-align: left; overflow-y: auto; max-height: 86vh; }
+      .panel.wide h2 { font-size: 1.1rem; margin: 16px 0 6px; color: var(--amber); }
+      .muted { color: #94a3b8; font-size: 11px; }
+      #dash-champion .champ { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; }
+      .spark { background: #070a0e; border: 1px solid #1e293b; border-radius: 2px; margin-top: 4px; }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #1e293b; }
+      #dash-status { color: var(--red); min-height: 1.2em; }
+      #spectate-list-body { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+      .spectate-row { text-align: left; }
+    </style>
+  </head>
+  <body>
+    <div class="crt-overlay"></div>
+    <canvas id="view"></canvas>
+
+    <!-- Top Tactical Command Bar -->
+    <div id="topbar" class="steel hidden">
+      <div class="title-box">
+        <span class="command-emblem" aria-hidden="true"></span>
+        <span class="title">CRUCIBLE</span>
+      </div>
+      <span class="opp" id="opponent"></span>
+      <span class="spacer"></span>
+      <span class="res"><span class="k">Ore</span> <span id="ore">0</span> <span id="income"></span></span>
+      <span class="res" id="power-res"><span class="k">Power</span> <span id="power-used">0</span>/<span id="power-total">0</span> <span id="power-badge" class="pwr-indicator"></span></span>
+      <span class="res"><span class="k">Turn</span> <span id="turn">1</span></span>
+    </div>
+
+    <!-- Right Command Sidebar: Selection, Build Menu, Radar -->
+    <div id="sidebar" class="steel hidden">
+      <div id="sel-card" class="steel">
+        <div class="steel-title">Tactical Status</div>
+        <div class="body">
+          <div id="sel-name">NO SELECTION</div>
+          <div id="sel-detail">SELECT BUILDING OR UNITS</div>
+          <div class="hpwrap hidden" id="sel-hpwrap"><div id="sel-hp"></div></div>
+          <div class="queue hidden" id="sel-queue"></div>
+        </div>
+      </div>
+
+      <div id="cmd-menu" class="steel">
+        <div class="steel-title">Command Matrix</div>
+        
+        <!-- Global Tool Action Bar: Repair, Sell & End Turn -->
+        <div id="cmd-actions">
+          <button id="action-repair" class="tool-btn" title="Repair Facility (20% of cost / click)">
+            <img class="tool-icon" id="action-repair-img" alt="Repair" />
+            <span class="tool-label">REPAIR</span>
+          </button>
+          <button id="action-sell" class="tool-btn" title="Reclaim / Sell Facility (+50% Ore refund)">
+            <img class="tool-icon" id="action-sell-img" alt="Sell" />
+            <span class="tool-label">SELL</span>
+          </button>
+          <button id="action-end-turn" class="tool-btn" title="End this turn: resolve production, income and combat, then hand over to the opponent">
+            <span class="tool-label">END TURN</span>
+          </button>
+        </div>
+
+        <!-- 4-Tab Navigation Bar with custom pixel-art icons -->
+        <div id="cmd-tabs">
+          <button class="cmd-tab-btn active" id="tab-btn-buildings" data-tab="buildings" title="Base Structures">
+            <img class="tab-icon" id="tab-icon-buildings" alt="Buildings" />
+          </button>
+          <button class="cmd-tab-btn" id="tab-btn-troops" data-tab="troops" title="Infantry Troops">
+            <img class="tab-icon" id="tab-icon-troops" alt="Troops" />
+          </button>
+          <button class="cmd-tab-btn" id="tab-btn-vehicles" data-tab="vehicles" title="Motorized & Armored Vehicles">
+            <img class="tab-icon" id="tab-icon-vehicles" alt="Vehicles" />
+          </button>
+          <button class="cmd-tab-btn" id="tab-btn-aircraft" data-tab="aircraft" title="Tactical Air Support">
+            <img class="tab-icon" id="tab-icon-aircraft" alt="Aircrafts" />
+          </button>
+        </div>
+
+        <div id="cmd-empty" class="hidden"></div>
+        <div class="grid" id="cmd-grid"></div>
+      </div>
+
+      <!-- Radar Surveillance -->
+      <div id="radar-block" class="steel">
+        <div class="steel-title">Radar Surveillance</div>
+        <div id="radar-wrap"><canvas id="radar" width="216" height="216"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Tactical Event Log -->
+    <div id="log" class="steel hidden">
+      <div class="steel-title">Combat Intelligence</div>
+      <div class="body" id="log-body"></div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <!-- Replay Spectator Bar (Zero Emojis) -->
+    <div id="spectate-bar" class="steel hidden">
+      <button class="btn" id="sp-play">PLAY</button>
+      <button class="btn" id="sp-speed">1X</button>
+      <input type="range" id="sp-scrub" min="0" max="1" value="0" />
+      <span id="sp-clock">0:00</span>
+      <span id="sp-score"></span>
+      <button class="btn" id="sp-close">EXIT</button>
+    </div>
+
+    <!-- Main Menu & Overlays -->
+    <div id="overlay">
+      <div class="live-feed-badge"><span class="rec-dot"></span> LIVE TACTICAL THEATER // SECTOR 04</div>
+      <div class="panel" id="lobby">
+        <div class="logo-box">
+          <!-- Pixel-stamped field plaque; intentionally CSS/HTML so the brand matches the sprite sheet. -->
+          <div class="crucible-emblem" role="img" aria-label="Crucible tactical warfare simulation">
+            <span class="emblem-mark">+</span>
+            <span class="emblem-word">CRUCIBLE</span>
+            <span class="emblem-mark">+</span>
+          </div>
+
+          <div class="logo-sub">TACTICAL WARFARE SIMULATION</div>
+        </div>
+
+        <p style="color:#cbd5e1; margin-bottom: 16px; font-size:12px; font-weight:700;">SELECT OPPONENT TO ENGAGE:</p>
+        <p id="lobby-status" class="muted" style="min-height:1.2em; margin-top:-8px;"></p>
+        <div class="row">
+          <button class="btn" data-opp="easy">Easy (Turtle)</button>
+          <button class="btn" data-opp="medium">Medium (Waves)</button>
+          <button class="btn" data-opp="hard">Hard (Expand)</button>
+        </div>
+        <div class="row">
+          <button class="btn" id="champion-btn" data-opp="champion" data-label="the champion" style="border-color:var(--amber); color:var(--amber-light);">Champion Neural Arena…</button>
+        </div>
+        <div class="row" id="museum-opps"></div>
+        <div class="row" style="margin-top:20px; border-top:1.5px solid #334155; padding-top:14px;">
+          <button class="btn" id="open-dashboard">Dashboard &amp; Lineage</button>
+          <button class="btn" id="open-spectate">Replay Archives</button>
+        </div>
+      </div>
+
+      <div class="panel hidden" id="result">
+        <h1 id="result-title"></h1>
+        <p id="result-detail" style="color:#cbd5e1; font-size:13px; margin: 12px 0 20px;"></p>
+        <p id="result-ghost" style="color:#fbbf24; font-size:12px; margin: -12px 0 20px;"></p>
+        <div class="row"><button class="btn" id="again">Return to Briefing</button></div>
+      </div>
+
+      <div class="panel wide hidden" id="dashboard">
+        <div class="logo-box" style="margin-bottom:12px; padding-bottom:8px;">
+          <h1 class="logo-title" style="font-size:1.5rem;">COMBAT INTELLIGENCE</h1>
+          <div class="logo-sub">Neural Evolutionary Progression &amp; Museum</div>
+        </div>
+        <div id="dash-status"></div>
+        <div id="dash-champion"></div>
+        <div id="dash-elo"></div>
+        <div id="dash-stats"></div>
+        <div id="dash-museum"></div>
+        <div id="dash-events"></div>
+        <div class="row"><button class="btn" id="dash-back">Return to Briefing</button></div>
+      </div>
+
+      <div class="panel wide hidden" id="spectate-list">
+        <div class="logo-box" style="margin-bottom:12px; padding-bottom:8px;">
+          <h1 class="logo-title" style="font-size:1.5rem;">REPLAY ARCHIVES</h1>
+          <div class="logo-sub">Deterministic Black Box Telemetry</div>
+        </div>
+        <div id="spectate-status"></div>
+        <div id="spectate-list-body"></div>
+        <div class="row"><button class="btn" id="spectate-list-back">Return to Briefing</button></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,357 @@
+//! Entities (units & buildings) and the v2 turn-based balance tables.
+//!
+//! All combat/economy stats are plain integers so they behave identically on
+//! every target. Entity ids are assigned in ascending creation order; every
+//! resolution step iterates entities in ascending id order (part of the
+//! determinism contract).
+//!
+//! The game is **turn-based**: there is no tick, no cooldown, no continuous
+//! position. Units act once per own turn (`mp` movement points + one attack),
+//! and combat resolves instantly with Advance-Wars-style damage scaling.
+
+use serde::{Deserialize, Serialize};
+
+/// Two players. Serialized as 0 / 1.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+#[repr(u8)]
+pub enum Player {
+    P0 = 0,
+    P1 = 1,
+}
+
+impl Player {
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn enemy(self) -> Player {
+        match self {
+            Player::P0 => Player::P1,
+            Player::P1 => Player::P0,
+        }
+    }
+
+    pub const ALL: [Player; 2] = [Player::P0, Player::P1];
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+pub enum BuildingType {
+    Hq,
+    PowerPlant,
+    Refinery,
+    Barracks,
+    Factory,
+    TechLab,
+    Airfield,
+    Radar,
+    TeslaCoil,
+    Turret,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+pub enum UnitType {
+    Infantry,
+    Tank,
+    Artillery,
+    MammothTank,
+    Gunship,
+    Interceptor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+pub enum Upgrade {
+    None,
+    Damage,
+    Hp,
+    Range,
+}
+
+/// Unique entity id within a match.
+pub type EntityId = u32;
+
+/// Static, per-type balance data. Distances/radii are integer tiles,
+/// durations in turns, ore in integer units.
+#[derive(Clone, Copy, Debug)]
+pub struct UnitStats {
+    pub cost: i32,
+    pub hp: i32,
+    pub damage: i32,
+    /// Attack range in tiles (Chebyshev-free Euclidean on tile centers).
+    pub range_tiles: i32,
+    /// Minimum attack range in tiles (artillery cannot fire inside this).
+    pub min_range_tiles: i32,
+    /// Movement points per turn (one orthogonal or diagonal step costs 1).
+    pub mp: i32,
+    /// Vision radius in tiles.
+    pub vision_tiles: i32,
+    /// Production time in turns.
+    pub build_time_turns: i32,
+    /// Whether the unit flies: it ignores terrain passability and building
+    /// blockers when moving.
+    pub air: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuildingStats {
+    pub cost: i32,
+    pub hp: i32,
+    pub vision_tiles: i32,
+    /// Attack damage (turrets only; fired once per own turn at end of turn).
+    pub damage: i32,
+    /// Attack range in tiles (turrets only).
+    pub range_tiles: i32,
+    /// Power produced (positive) or consumed (negative).
+    pub power: i32,
+}
+
+pub const fn unit_stats(ut: UnitType) -> UnitStats {
+    use UnitType::*;
+    match ut {
+        Infantry => UnitStats {
+            cost: 50,
+            hp: 90,
+            damage: 55,
+            range_tiles: 1,
+            min_range_tiles: 0,
+            mp: 3,
+            vision_tiles: 4,
+            build_time_turns: 1,
+            air: false,
+        },
+        Tank => UnitStats {
+            cost: 150,
+            hp: 260,
+            damage: 105,
+            range_tiles: 1,
+            min_range_tiles: 0,
+            mp: 5,
+            vision_tiles: 5,
+            build_time_turns: 2,
+            air: false,
+        },
+        // Long-range siege: cannot fire point blank (min range 2), fragile,
+        // slow — but outranges every turret and hits from behind the line.
+        Artillery => UnitStats {
+            cost: 200,
+            hp: 120,
+            damage: 110,
+            range_tiles: 3,
+            min_range_tiles: 2,
+            mp: 3,
+            vision_tiles: 6,
+            build_time_turns: 2,
+            air: false,
+        },
+        MammothTank => UnitStats {
+            cost: 350,
+            hp: 550,
+            damage: 170,
+            range_tiles: 1,
+            min_range_tiles: 0,
+            mp: 4,
+            vision_tiles: 5,
+            build_time_turns: 3,
+            air: false,
+        },
+        // Fast strike aircraft (airfield-built). Fragile but mobile: flies over
+        // everything, strikes from range 2 where melee units cannot retaliate.
+        Gunship => UnitStats {
+            cost: 250,
+            hp: 140,
+            damage: 105,
+            range_tiles: 2,
+            min_range_tiles: 0,
+            mp: 7,
+            vision_tiles: 5,
+            build_time_turns: 2,
+            air: true,
+        },
+        Interceptor => UnitStats {
+            cost: 200,
+            hp: 110,
+            damage: 70,
+            range_tiles: 2,
+            min_range_tiles: 0,
+            mp: 8,
+            vision_tiles: 6,
+            build_time_turns: 2,
+            air: true,
+        },
+    }
+}
+
+pub const fn building_stats(bt: BuildingType) -> BuildingStats {
+    use BuildingType::*;
+    match bt {
+        Hq => BuildingStats {
+            cost: 0,
+            hp: 1500,
+            vision_tiles: 5,
+            damage: 0,
+            range_tiles: 0,
+            power: 50,
+        },
+        PowerPlant => BuildingStats {
+            cost: 150,
+            hp: 300,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: 100,
+        },
+        Refinery => BuildingStats {
+            cost: 300,
+            hp: 400,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: -20,
+        },
+        Barracks => BuildingStats {
+            cost: 150,
+            hp: 300,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: -15,
+        },
+        Factory => BuildingStats {
+            cost: 250,
+            hp: 400,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: -25,
+        },
+        TechLab => BuildingStats {
+            cost: 200,
+            hp: 250,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: -30,
+        },
+        Airfield => BuildingStats {
+            cost: 250,
+            hp: 350,
+            vision_tiles: 4,
+            damage: 0,
+            range_tiles: 0,
+            power: -25,
+        },
+        // Long-range early-warning dish: reveals a huge swath of the map so
+        // scouting happens passively. The tech payoff for map awareness.
+        Radar => BuildingStats {
+            cost: 150,
+            hp: 300,
+            vision_tiles: 10,
+            damage: 0,
+            range_tiles: 0,
+            power: -10,
+        },
+        // High-voltage coil defense: a turret that outranges and out-hits the
+        // standard turret (range 4, 24 dmg), gated on the TechLab.
+        TeslaCoil => BuildingStats {
+            cost: 250,
+            hp: 260,
+            vision_tiles: 4,
+            damage: 24,
+            range_tiles: 4,
+            power: -30,
+        },
+        Turret => BuildingStats {
+            cost: 100,
+            hp: 150,
+            vision_tiles: 4,
+            damage: 12,
+            range_tiles: 3,
+            power: -20,
+        },
+    }
+}
+
+/// Passive income: each player's HQ generates this much ore per turn.
+pub const HQ_INCOME_PER_TURN: i32 = 10;
+/// Passive income: each refinery drains up to this much ore per turn from
+/// adjacent ore tiles (lowest tile-index first). A refinery whose adjacent
+/// fields are depleted earns nothing.
+pub const REFINERY_ORE_PER_TURN: i32 = 60;
+
+/// Which units a building can train.
+pub fn building_produces(bt: BuildingType) -> &'static [UnitType] {
+    use BuildingType::*;
+    use UnitType::*;
+    match bt {
+        Barracks => &[Infantry],
+        Factory => &[Tank, Artillery, MammothTank],
+        Airfield => &[Gunship, Interceptor],
+        _ => &[],
+    }
+}
+
+/// Where a building may be placed: within this many tiles (center-to-center)
+/// of at least one own building, so bases grow in connected clumps instead of
+/// floating structures. Refineries are exempt (they must instead be placed
+/// adjacent to an ore tile — see `Game::validate_place`), which makes remote
+/// ore pockets the expansion mechanic.
+pub const PLACE_RADIUS_TILES: i32 = 5;
+
+/// Fog memory: remembered enemy sightings drop after this many turns unseen.
+pub const FOG_MEMORY_TURNS: i32 = 6;
+
+/// Repair command: heals this fraction of a building's max HP...
+pub const REPAIR_HP_NUM: i32 = 30;
+pub const REPAIR_HP_DEN: i32 = 100;
+/// ...at this fraction of its build cost (minimum 10 ore).
+pub const REPAIR_COST_NUM: i32 = 20;
+pub const REPAIR_COST_DEN: i32 = 100;
+pub const REPAIR_MIN_COST: i32 = 10;
+
+/// A building in the world.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Building {
+    pub id: EntityId,
+    pub owner: Player,
+    pub btype: BuildingType,
+    pub tile: (u8, u8),
+    pub hp: i32,
+    pub max_hp: i32,
+    /// Pending production queue (unit types).
+    pub queue: Vec<UnitType>,
+    /// Progress toward the current queue head, in turns.
+    pub progress: i32,
+    /// Attack cooldown (turrets fire once per own turn; unused otherwise).
+    pub cooldown: i32,
+    /// Whether this building was repaired already this turn.
+    #[serde(default)]
+    pub repaired_this_turn: bool,
+}
+
+impl Building {
+    pub fn is_alive(&self) -> bool {
+        self.hp > 0
+    }
+}
+
+/// A unit in the world. One move + one attack per own turn.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Unit {
+    pub id: EntityId,
+    pub owner: Player,
+    pub utype: UnitType,
+    pub tile: (u8, u8),
+    pub hp: i32,
+    pub max_hp: i32,
+    /// Movement points remaining this turn.
+    pub mp: i32,
+    /// Has moved this turn (a unit may move then attack, not attack then move).
+    pub moved: bool,
+    /// Has attacked this turn (ends the unit's activation).
+    pub acted: bool,
+}
+
+impl Unit {
+    pub fn is_alive(&self) -> bool {
+        self.hp > 0
+    }
+}

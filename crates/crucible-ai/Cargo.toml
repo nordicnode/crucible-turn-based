@@ -1,0 +1,9 @@
+[package]
+name = "crucible-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The AI commander: features, MLP network, decision layer, scripted baselines. Pure."
+
+[dependencies]
+crucible-sim.workspace = true

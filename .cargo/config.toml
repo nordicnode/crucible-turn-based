@@ -1,0 +1,4 @@
+# Run wasm32 tests through wasm-bindgen-test-runner (under node) so the
+# golden-parity tests in crucible-client-wasm execute cross-target.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

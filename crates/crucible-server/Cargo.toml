@@ -1,0 +1,28 @@
+[package]
+name = "crucible-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Server binary: HTTP/WS, static client, training orchestration, SQLite. The only impure crate."
+
+[[bin]]
+name = "crucible-server"
+path = "src/main.rs"
+
+[dependencies]
+crucible-sim.workspace = true
+crucible-ai.workspace = true
+crucible-evo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

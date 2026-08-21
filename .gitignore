@@ -1,0 +1,28 @@
+# Rust
+/target
+
+# Node / client
+node_modules/
+client/dist/
+*.tsbuildinfo
+
+# Generated wasm-bindgen bindings (built by scripts/build-wasm.sh)
+client/src/wasm/*
+!client/src/wasm/loader.ts
+
+# Freebuff local state
+.freebuff/
+
+# Nested dev scaffolding (unrelated local project tree)
+home/
+
+# Runtime data (SQLite lives here)
+/data/*
+!/data/.gitignore
+
+# Working development plan (local planning doc, not part of the repo)
+CRUCIBLE_development_plan.md
+
+# Editor / OS
+.DS_Store
+*.swp

@@ -1,0 +1,3 @@
+# Runtime SQLite database and derived artifacts live here; never commit them.
+*
+!.gitignore
