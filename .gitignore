@@ -20,8 +20,9 @@ home/
 /data/*
 !/data/.gitignore
 
-# Working development plan (local planning doc, not part of the repo)
+# Working development plans (local planning docs, not part of the repo)
 CRUCIBLE_development_plan.md
+TURN_BASED_DESIGN.md
 
 # Editor / OS
 .DS_Store

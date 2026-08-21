@@ -1,9 +1,11 @@
 # CRUCIBLE
 
-A minimalist real-time strategy game with one twist: **the opponent is a neural
+A minimalist turn-based strategy game with one twist: **the opponent is a neural
 network that learns while you play.**
 
-Every match you fight, win or lose, becomes training data. The AI plays
+Play alternates between you and the machine the way it does in Advance Wars or
+Civilization — you issue orders on your turn, end it, and watch the AI take
+its. Every match you fight, win or lose, becomes training data. The AI plays
 against itself around the clock, a champion only gets replaced when a
 challenger can prove it's better, and the strategy you used to win last night
 gets countered before you sit down again.
@@ -15,7 +17,7 @@ gets countered before you sit down again.
 - **Watch it improve.** The dashboard charts the champion's Elo over
   generations, its lineage, and every dethroned champion.
 - **Replay any match.** Every game is saved as a tiny input log; watch it back
-  step-by-step in the browser, unfogged, with play / pause / speed / scrub.
+  frame-per-turn in the browser, unfogged, with play / pause / speed / scrub.
 - **Feed it ghosts.** Your matches are replayed during training as frozen
   "ghost" opponents, so the strategy that beat you becomes tomorrow's training
   data — adopted into the pool live, no server restart needed. Matches where
@@ -25,7 +27,8 @@ gets countered before you sit down again.
 
 ## Quick start
 
-You need a recent Rust toolchain, Node 20+, and a browser.
+You need a recent Rust toolchain (CI is pinned to 1.95.0), Node 20+, and a
+browser.
 
 ```bash
 # 1. One-time setup: wasm target, bindings tool, client dependencies
@@ -46,59 +49,76 @@ champion, start the trainer too (see *Training the AI* below).
 
 ## How to play
 
-- **Left-click** to select; **drag a box** to select several (hold **Shift** to add).
-- **Right-click** to move / attack-move; **right-click an enemy unit or
-  building to focus-fire it** (the selected combat units lock onto that one
-  target and ignore everything else, C&C-style); right-click on one of your
-  own production buildings sets its rally point.
-- **Middle-drag** pans the camera, **mouse wheel** zooms, **Esc** cancels placement.
-- Select a building to train units, research upgrades (Tech Lab), or sell it.
-  With nothing selected, the build panel offers PowerPlant, Refinery,
-  Barracks, Factory, Tech Lab, Airfield, Radar, Tesla Coil, and Turret.
-  Tech Lab and Airfield require a Factory; **Radar and Tesla Coil are the
-  second tier and require the Tech Lab itself**. The Tech Lab also unlocks
-  three research tracks — High-Explosive (+15% damage), Reinforced Armor
-  (+15% HP), and Extended Range (+20% range) — one per player, chosen from
-  the lab's command card. The Airfield trains Gunships and Interceptors from
-  the aircraft tab — aircraft fly **over buildings** (though not over map
-  terrain), so they can strike straight through a base's walls and turret
-  line, and everything on the ground can still shoot them down.
-- C&C-style cursors: hovering an enemy with attack-capable units selected
-  shows a red targeting reticle; the Sell tool shows a **$** over sellable
-  buildings and Repair shows a **wrench** over damaged ones.
-- Buildings must be placed within a few tiles of an existing one, so your base
+A match is a sequence of strictly alternating turns. You act, press **END TURN**
+in the sidebar, the opponent acts, and control returns to you. The top bar shows
+the current turn and whose turn it is; while the opponent plays ("OPPONENT
+TURN…") your inputs are ignored, and the server enforces that anyway.
+
+**On your turn** you may issue up to 16 commands — build, train, move, attack —
+in any order, then end your turn.
+
+- **Select.** Left-click a unit or building to select it; drag a box to select a
+  group (hold **Shift** to add). Middle-drag pans the camera, the mouse wheel
+  zooms, and **Esc** cancels whatever you're placing.
+- **Move & attack.** With combat units selected, **right-click open ground** to
+  march them there — they advance up to their movement points (MP) on your turn.
+  **Right-click an enemy** to focus-fire it: every selected unit in range
+  attacks it together, and adjacent units move up. Moving and then attacking in
+  one turn is allowed.
+- **Build.** With nothing selected, the sidebar offers PowerPlant, Refinery,
+  Barracks, Factory, TechLab, Airfield, Radar, TeslaCoil, and Turret.
+  Buildings must be placed within a few tiles of an existing one, so your base
   grows as a connected clump (the placement ghost turns green when the spot is
-  valid, red when it isn't).
-- You see only your own fog-of-war view and are capped at a human-plausible
-  120 actions per minute.
+  valid, red when it isn't). A **Refinery must sit next to an ore field** — ore
+  is only worth anything where a refinery can drain it.
+- **Train & research.** Select a production building to queue units (Barracks →
+  Infantry; Factory → Tank / Artillery / MammothTank; Airfield → Gunship /
+  Interceptor). Select a TechLab to research one of three upgrades. Select any
+  building to repair or sell it.
+- **Power.** The HQ and PowerPlants produce power; Refineries, Barracks,
+  Factories, TechLabs, Airfields, Radar, and Turrets consume it. If consumption
+  ever exceeds production, your production queues only advance every other
+  turn — build a PowerPlant to lift the cap, the same way the AI does.
+- **Economy.** Ore arrives passively: the HQ banks a small trickle each turn,
+  and each refinery drains up to 60 ore per turn from the ore tiles adjacent to
+  it (income reads `+N` from the accumulated drain). No refineries, no income.
+- **Fog of war.** You see only tiles near your own units and buildings. Enemy
+  sightings fade after 6 turns unseen, so scouting matters — especially the
+  passive Radar dish, which reveals a huge swath of the battlefield.
 
-You start with a Harvester; it mines the gold crystals and banks ore at a
-Refinery (watch the `workers` counter and the `+N/s` income readout in the
-top bar — income comes only from harvester deposits; refineries give no
-passive trickle).
-
-Watch the power readout too: the HQ and PowerPlants produce power, while
-Refineries, Barracks, Factories, Tech Labs, Airfields, and Turrets drain it.
-If consumption ever exceeds production, your production lines slow to half
-speed — build a PowerPlant to lift the cap, the same way the AI does.
-
-Destroy the enemy HQ to win. Matches have no time limit — the game ends only
-when an HQ falls (training matches keep an internal cap so a degenerate
-self-play game can't run forever).
+**Win by destroying the enemy HQ.** Matches cap at 80 turns; if nobody falls by
+then, the player with the higher remaining military value takes it (a draw if
+equal).
 
 ## The game
 
-One resource (ore), ten buildings (HQ, PowerPlant, Refinery, Barracks,
-Factory, Tech Lab, Airfield, Radar, Tesla Coil, and Turret), seven units
-(Harvester, Infantry, Tank, Artillery, Mammoth Tank — the three vehicles and
-the mammoth need a Tech Lab — plus Gunship and Interceptor, which need an
-Airfield), on procedurally generated 64×64 maps. Radar dishes reveal a huge
-swath of the battlefield passively; Tesla Coils are long-range arc turrets.
-Maps are point-symmetric (spawn fairness is a theorem) with rich ore-field
-cores, occasional mid-field rocks for cover, and varied expansion-site sizes.
-The simulation runs at a fixed 10 ticks per second and is fully
-deterministic and server-authoritative. Harvesters must dock at a Refinery to
-unload ore — they cannot transfer it from a distance.
+One resource (ore), ten buildings (HQ, PowerPlant, Refinery, Barracks, Factory,
+TechLab, Airfield, Radar, TeslaCoil, Turret), and six units on procedurally
+generated 64×64 maps:
+
+| Unit | Cost | HP | Dmg | Range | MP | Build | Notes |
+|---|---|---|---|---|---|---|---|
+| Infantry | 50 | 90 | 55 | 1 | 3 | 1 t | Barracks; cheap line troops |
+| Tank | 150 | 260 | 105 | 1 | 5 | 2 t | Factory; the workhorse |
+| Artillery | 200 | 120 | 110 | 3 (min 2) | 3 | 2 t | Siege; can't fire point-blank |
+| MammothTank | 350 | 550 | 170 | 1 | 4 | 3 t | TechLab; slow heavy armor |
+| Gunship | 250 | 140 | 105 | 2 | 7 | 2 t | Airfield; flies over everything |
+| Interceptor | 200 | 110 | 70 | 2 | 8 | 2 t | Airfield; fast strike aircraft |
+
+TechLab (requires a Factory) unlocks the MammothTank and one global research
+track per player: **High-Explosive (+25% damage), Reinforced Armor (+25% HP)**,
+or **Extended Range (+1 tile)**. Radar and TeslaCoil are the second tier and
+need the TechLab itself; the TeslaCoil is a long-range arc turret (range 4,
+24 dmg), the plain Turret is cheaper and shorter-ranged (range 3, 12 dmg), and
+both fire automatically once at the end of your turn.
+
+Combat is deterministic Advance-Wars-style: damage scales with the attacker's
+remaining HP, and a defender in range counterattacks once. There is no
+randomness in a battle — the seeded PRNG exists only for map generation. Maps
+are point-symmetric (spawn fairness is a theorem) with rich ore-field cores,
+occasional mid-field rocks for cover, and varied expansion-site sizes. The
+engine runs on strictly alternating turns with no wall clock and no in-game
+RNG, and is fully deterministic and server-authoritative.
 
 ## Training the AI
 
@@ -130,11 +150,11 @@ and `http://127.0.0.1:8787/api/champion` (current champion + Elo).
 ## How the AI works
 
 - **The commander, not the soldier.** The evolvable brain is a small neural
-  network (~12k weights) that makes strategic decisions on a 2-second tick:
-  build, train, expand, attack. Individual units run scripted micro. It plays
-  with the same fog of war and APM limit you do. Your own commands are applied
-  immediately (within one 100 ms tick), so the game stays responsive even
-  though the opponent deliberates slowly.
+  network (~17.5k weights) that makes strategic decisions once per turn: what
+  to build, train, expand toward, and attack. Movement and attack execution for
+  a decided army are scripted. It plays under the same fog of war and action
+  budget you do. Your commands apply immediately as you send them; the opponent
+  deliberates once its turn begins.
 - **Evolution strategy.** A population of genomes competes in headless
   self-play; the strongest are kept and mutated. No backpropagation; selection
   pressure does the learning.
@@ -143,9 +163,9 @@ and `http://127.0.0.1:8787/api/champion` (current champion + Elo).
   outcome.
 - **Ghosts.** Your replays are replayed as frozen opponents during training, so
   a strategy that beats the champion gets countered within a training cycle.
-- **Determinism.** One seeded PRNG, a fixed timestep, integer math, and
-  input-log replays mean any match or promotion can be reproduced
-  byte-for-byte, natively and in the browser's wasm shim.
+- **Determinism.** One seeded PRNG (map generation only), integer math, no
+  in-game RNG, and input-log replays mean any match or promotion can be
+  reproduced byte-for-byte, natively and in the browser's wasm shim.
 
 ## For developers
 
@@ -154,7 +174,7 @@ TypeScript client:
 
 ```
 crates/
-  crucible-sim/          deterministic sim core (no IO)
+  crucible-sim/          deterministic turn-based sim core (no IO)
   crucible-ai/           neural commander + scripted bots
   crucible-evo/          evolution, gauntlet, ghosts, Elo
   crucible-server/       HTTP/WS + trainer + SQLite (the only impure crate)
