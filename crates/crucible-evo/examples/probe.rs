@@ -108,10 +108,7 @@ fn main() {
             for ev in &game.events {
                 match &ev.kind {
                     crucible_sim::EventKind::Attacked {
-                        attacker,
-                        target,
-                        damage: _,
-                        ..
+                        attacker, target, ..
                     } => {
                         *seen.entry((*attacker, *target)).or_insert(0) += 1;
                         total_attacks += 1;

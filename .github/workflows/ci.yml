@@ -13,6 +13,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: ""
+  # Pinned to the developer's local toolchain so CI behavior is reproducible;
+  # bump both together when upgrading.
+  RUST_TOOLCHAIN: "1.95.0"
   # Must match the wasm-bindgen crate version pinned in Cargo.lock — the
   # generated bindings and the wasm test runner are CLI-version-locked to it.
   WASM_BINDGEN_VERSION: "0.2.127"
@@ -26,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@${{ env.RUST_TOOLCHAIN }}
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
@@ -64,7 +67,7 @@ jobs:
           cache-dependency-path: client/package-lock.json
 
       - name: Install Rust toolchain (for wasm bindings)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@${{ env.RUST_TOOLCHAIN }}
         with:
           targets: wasm32-unknown-unknown
 
