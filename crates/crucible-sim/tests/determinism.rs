@@ -56,6 +56,96 @@ fn map_fairness_over_10k_seeds() {
     }
 }
 
+/// Every generated map must let either player put a Refinery down on turn 1:
+/// there is always an ore tile near spawn with a free, passable, unpaid-for
+/// neighbor inside the build radius. This is the player-facing guarantee that
+/// replaced the old "ore at the edge of vision" spawns.
+#[test]
+fn every_map_supports_turn1_refinery() {
+    use crucible_sim::{BuildingType, Command, GameConfig, Player};
+    for seed in 0..1000u64 {
+        let mut g = crucible_sim::Game::new(
+            Map::generate(seed),
+            GameConfig {
+                starting_ore: 1000,
+                ..GameConfig::default()
+            },
+        );
+        let hq = g.hq(Player::P0).unwrap().tile;
+        let ore = nearest_ore_tile(&g, hq);
+        let tile = free_refinery_slot(&g, ore);
+        let res = g.apply_commands(
+            Player::P0,
+            &[Command::PlaceBuilding {
+                player: Player::P0,
+                btype: BuildingType::Refinery,
+                tile,
+            }],
+        );
+        assert_eq!(
+            res,
+            vec![Ok(())],
+            "seed {seed}: turn-1 refinery rejected at ({},{}) near ore ({},{})",
+            tile.0,
+            tile.1,
+            ore.0,
+            ore.1
+        );
+    }
+}
+
+/// The nearest ore tile to `from` (Chebyshev).
+fn nearest_ore_tile(g: &crucible_sim::Game, from: (u8, u8)) -> (u8, u8) {
+    let mut best: Option<(i32, (u8, u8))> = None;
+    for (idx, &amount) in g.map.ore.iter().enumerate() {
+        if amount <= 0 {
+            continue;
+        }
+        let t = crucible_sim::map::tile_coords(idx);
+        let d = crucible_sim::tiles::chebyshev(from.0, from.1, t.0, t.1);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, t));
+        }
+    }
+    best.unwrap().1
+}
+
+/// A passable, unoccupied, non-ore neighbor of `t`, ascending tile-index (the
+/// same tie-break the golden scenario and bots use).
+fn free_refinery_slot(g: &crucible_sim::Game, t: (u8, u8)) -> (u8, u8) {
+    let mut candidates: Vec<(u8, u8)> = [
+        (1i32, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ]
+    .iter()
+    .filter_map(|&(dx, dy)| {
+        let (x, y) = (t.0 as i32 + dx, t.1 as i32 + dy);
+        if x >= 0 && y >= 0 && x < 64 && y < 64 && !(x == t.0 as i32 && y == t.1 as i32) {
+            Some((x as u8, y as u8))
+        } else {
+            None
+        }
+    })
+    .collect();
+    candidates.sort_by_key(|&tt| crucible_sim::map::tile_index(tt.0, tt.1));
+    // Fall through to `t` itself if every neighbor is blocked (never for the
+    // generated maps, which guarantee connectivity).
+    candidates
+        .into_iter()
+        .find(|&tt| {
+            g.map.is_passable(tt.0, tt.1)
+                && g.building_at(tt).is_none()
+                && g.map.ore_at(tt.0, tt.1) == 0
+        })
+        .unwrap_or(t)
+}
+
 #[allow(dead_code)]
 fn _balance_refs() {
     let _ = building_stats(BuildingType::Hq).hp;

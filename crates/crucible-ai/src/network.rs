@@ -19,11 +19,20 @@ pub const HIDDEN2: usize = 48;
 
 /// Genome schema version. Bumped on every change to the encoding; stored
 /// genomes with a different version are invalid.
-pub const GENOME_SCHEMA_VERSION: u32 = 6;
+///
+/// v7 (research cutover): the 4-slot tech head now scores technologies
+/// (`StartResearch`) instead of the old damage/hp/range upgrades, the
+/// upgrade one-hot feature became research state (points / researching /
+/// researched-count / crystal), and the reserved feature slots now carry
+/// the new units & buildings (scouts, rocket troopers, SAM launchers,
+/// crystal refineries, AA turrets).
+pub const GENOME_SCHEMA_VERSION: u32 = 7;
 
 /// Output head layout (see `decision.rs`).
 pub const BUILD_OUT: usize = 8;
-/// Train slots: infantry, tank, artillery, mammoth, gunship, interceptor.
+/// Train slots: infantry, tank, artillery, mammoth, gunship, interceptor
+/// (the learned policy keeps the classic six; the scripted bots field the
+/// full roster).
 pub const TRAIN_OUT: usize = 6;
 /// Army-wide actions: attack-move, defend, scout, and focus-fire (snipe).
 pub const ARMY_ACTION_OUT: usize = 4;

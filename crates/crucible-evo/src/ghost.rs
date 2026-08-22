@@ -32,6 +32,11 @@ pub struct Ghost {
     /// so `own_index` ranks map onto the k-th created entity even after
     /// casualties — a live-only snapshot would silently misalign.
     known_own: Vec<EntityId>,
+    /// Same contract for the enemy side. Attacks remap their target through
+    /// `enemy_index`; a live-only list is wrong the moment the enemy suffers
+    /// any casualty (ranks shift by the deaths), so targets of later attacks
+    /// silently got dropped once an earlier enemy unit died.
+    known_enemy: Vec<EntityId>,
     cursor: usize,
 }
 
@@ -103,6 +108,7 @@ impl Ghost {
             own_index,
             enemy_index,
             known_own: Vec::new(),
+            known_enemy: Vec::new(),
             cursor: 0,
         }
     }
@@ -118,6 +124,7 @@ impl Ghost {
     pub fn reset(&mut self) {
         self.cursor = 0;
         self.known_own.clear();
+        self.known_enemy.clear();
     }
 
     /// The ghost's own entities in creation order (sorted by id).
@@ -189,10 +196,9 @@ impl Ghost {
                     target: at_enemy(target)?,
                 })
             }
-            ChooseUpgrade { lab, upgrade, .. } => Some(ChooseUpgrade {
+            StartResearch { tech, .. } => Some(StartResearch {
                 player,
-                lab: at_own(lab)?,
-                upgrade: *upgrade,
+                tech: *tech,
             }),
             Sell { building, .. } => Some(Sell {
                 player,
@@ -226,7 +232,13 @@ impl Bot for Ghost {
             }
         }
         self.known_own.sort_unstable();
-        let enemy = self.current_entities(game, player.enemy());
+        let live_enemy = self.current_entities(game, player.enemy());
+        for id in live_enemy.into_iter() {
+            if !self.known_enemy.contains(&id) {
+                self.known_enemy.push(id);
+            }
+        }
+        self.known_enemy.sort_unstable();
         // Fire every recorded command whose turn has arrived (turns only move
         // forward; the ghost's cursor never rewinds within a match).
         while self.cursor < self.commands.len() {
@@ -234,7 +246,7 @@ impl Bot for Ghost {
             if tc.turn > game.turn {
                 break;
             }
-            if let Some(cmd) = self.remap(&tc.command, &self.known_own, &enemy, player) {
+            if let Some(cmd) = self.remap(&tc.command, &self.known_own, &self.known_enemy, player) {
                 out.push(cmd);
             }
             self.cursor += 1;

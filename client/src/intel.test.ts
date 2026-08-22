@@ -30,7 +30,8 @@ describe("Intel formatters", () => {
     expect(friendlyUnitReadyMsg("Tank")).toBe("Tank roll out");
     expect(friendlyUnitReadyMsg("Artillery")).toBe("Artillery operational");
     expect(friendlyUnitReadyMsg("MammothTank")).toBe("Mammoth Tank deployed");
-    expect(friendlyUnitReadyMsg("Scout")).toBe("Scout ready for orders");
+    expect(friendlyUnitReadyMsg("Scout")).toBe("Scout buggy ready");
+    expect(friendlyUnitReadyMsg("SamLauncher")).toBe("SAM launcher deployed");
   });
 });
 
@@ -74,15 +75,16 @@ describe("IntelLogger", () => {
     expect(entry?.tag).toBe("UNIT");
   });
 
-  it("logs upgrade completions", () => {
+  it("logs research start and completion", () => {
     const logger = new IntelLogger();
-    const evDmg: DiffEvent = { turn: 300, kind: "upgrade:damage", player: 0 };
-    const resDmg = logger.processDiffEvent(evDmg);
-    expect(resDmg?.text).toContain("High-Explosive");
+    const evStart: DiffEvent = { turn: 300, kind: "research:highexplosive", player: 0 };
+    const resStart = logger.processDiffEvent(evStart);
+    expect(resStart?.text).toContain("High-Explosive Payloads");
+    expect(resStart?.tag).toBe("TECH");
 
-    const evHp: DiffEvent = { turn: 400, kind: "upgrade:hp", player: 0 };
-    const resHp = logger.processDiffEvent(evHp);
-    expect(resHp?.text).toContain("Reinforced Armor");
+    const evDone: DiffEvent = { turn: 400, kind: "researched:rocketpropulsion", player: 0 };
+    const resDone = logger.processDiffEvent(evDone);
+    expect(resDone?.text).toContain("Rocket Propulsion");
   });
 
   it("logs structure sales", () => {

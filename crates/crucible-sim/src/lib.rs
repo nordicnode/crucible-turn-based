@@ -25,12 +25,12 @@ pub mod map;
 pub mod orders;
 pub mod rng;
 pub mod serialize;
+pub mod tech;
 pub mod tiles;
 
 pub use entity::{
     building_produces, building_stats, unit_stats, Building, BuildingType, EntityId, Player, Unit,
-    UnitType, Upgrade, FOG_MEMORY_TURNS, HQ_INCOME_PER_TURN, PLACE_RADIUS_TILES,
-    REFINERY_ORE_PER_TURN,
+    UnitType, FOG_MEMORY_TURNS, HQ_INCOME_PER_TURN, PLACE_RADIUS_TILES, REFINERY_ORE_PER_TURN,
 };
 pub use game::{EventKind, Game, GameConfig, GameEvent, WinReason};
 pub use map::{open_test_map, Map};

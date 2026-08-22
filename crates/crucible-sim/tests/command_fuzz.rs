@@ -4,8 +4,8 @@
 //! deterministic and reproducible. State invariants are checked every turn.
 
 use crucible_sim::{
-    building_stats, unit_stats, BuildingType, Command, CommandError, Game, GameConfig, Map, Player,
-    Rng, UnitType, Upgrade,
+    building_stats, tech::TechId, unit_stats, BuildingType, Command, CommandError, Game,
+    GameConfig, Map, Player, Rng, UnitType,
 };
 
 const TURNS: i32 = 120;
@@ -23,7 +23,7 @@ fn config() -> GameConfig {
 /// is legal is the validator's job.
 fn random_command(rng: &mut Rng, g: &Game, p: Player) -> Command {
     let tile = ((rng.below(64) as u8), (rng.below(64) as u8));
-    let bt = match rng.below(10) {
+    let bt = match rng.below(12) {
         0 => BuildingType::Hq,
         1 => BuildingType::PowerPlant,
         2 => BuildingType::Refinery,
@@ -33,15 +33,20 @@ fn random_command(rng: &mut Rng, g: &Game, p: Player) -> Command {
         6 => BuildingType::Airfield,
         7 => BuildingType::Radar,
         8 => BuildingType::TeslaCoil,
-        _ => BuildingType::Turret,
+        9 => BuildingType::Turret,
+        10 => BuildingType::CrystalRefinery,
+        _ => BuildingType::AATurret,
     };
-    let ut = match rng.below(6) {
+    let ut = match rng.below(9) {
         0 => UnitType::Infantry,
-        1 => UnitType::Tank,
-        2 => UnitType::Artillery,
-        3 => UnitType::MammothTank,
-        4 => UnitType::Gunship,
-        _ => UnitType::Interceptor,
+        1 => UnitType::Scout,
+        2 => UnitType::RocketTrooper,
+        3 => UnitType::Tank,
+        4 => UnitType::Artillery,
+        5 => UnitType::MammothTank,
+        6 => UnitType::Gunship,
+        7 => UnitType::Interceptor,
+        _ => UnitType::SamLauncher,
     };
     let building_id = g
         .buildings
@@ -59,11 +64,17 @@ fn random_command(rng: &mut Rng, g: &Game, p: Player) -> Command {
         2 => Vec::new(),
         _ => (0..rng.below(5)).map(|_| unit_id).collect(),
     };
-    let upgrade = match rng.below(4) {
-        0 => Upgrade::None,
-        1 => Upgrade::Damage,
-        2 => Upgrade::Hp,
-        _ => Upgrade::Range,
+    let tech = match rng.below(10) {
+        0 => TechId::HighExplosive,
+        1 => TechId::CompositeArmor,
+        2 => TechId::TargetingOptics,
+        3 => TechId::EfficientRefining,
+        4 => TechId::RocketPropulsion,
+        5 => TechId::TitaniumAlloys,
+        6 => TechId::AerialSuperiority,
+        7 => TechId::Superconductors,
+        8 => TechId::CrystalNanotech,
+        _ => TechId::AdvancedBallistics,
     };
 
     match rng.below(8) {
@@ -87,11 +98,7 @@ fn random_command(rng: &mut Rng, g: &Game, p: Player) -> Command {
             units,
             target: unit_id,
         },
-        4 => Command::ChooseUpgrade {
-            player: p,
-            lab: building_id,
-            upgrade,
-        },
+        4 => Command::StartResearch { player: p, tech },
         5 => Command::Sell {
             player: p,
             building: building_id,

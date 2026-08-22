@@ -86,6 +86,7 @@ class Spectate {
     hide("sidebar");
     hide("log");
     hide("spectate-bar");
+    hide("turn-ribbon");
     show("overlay");
     show("spectate-list");
     this.active = false;

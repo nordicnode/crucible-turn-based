@@ -130,6 +130,115 @@ export function drawPassableTile(
   }
 }
 
+/** Forest: dense canopy over dark soil (+25% defense in the sim). */
+export function drawForestTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#0a0f0d");
+    pStroke(ctx, px, py, size, size, "#040705");
+    return;
+  }
+
+  // Dark mossy earth base
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#14241a" : "#172b1f");
+  pStroke(ctx, px, py, size, size, "#0d1a12");
+
+  // Canopy blobs
+  const blob = h % 3;
+  if (size >= 8) {
+    const c1 = "#1d3a24", c2 = "#24502e";
+    pRect(ctx, px + size * 0.12, py + size * 0.18, size * 0.3, size * 0.26, c1);
+    pRect(ctx, px + size * 0.38, py + size * 0.42, size * 0.32, size * 0.28, c2);
+    pRect(ctx, px + size * 0.55, py + size * 0.1, size * 0.28, size * 0.24, c2);
+    pRect(ctx, px + size * 0.6, py + size * 0.5, size * 0.26, size * 0.3, c1);
+    if (blob === 0) {
+      pRect(ctx, px + size * 0.28, py + size * 0.2, size * 0.18, size * 0.14, "#2f6a3c");
+    }
+  }
+}
+
+/** Hills: rugged tan earthworks with ridgelines (+30% defense in the sim). */
+export function drawHillsTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#100e0a");
+    pStroke(ctx, px, py, size, size, "#070604");
+    return;
+  }
+
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#2b261c" : "#312b1f");
+  pStroke(ctx, px, py, size, size, "#1c1810");
+
+  // Contour ridgelines
+  const fv = h % 3;
+  if (size >= 8) {
+    pRect(ctx, px + 2, py + size * 0.55, size * 0.6, 2, "#4a4030");
+    pRect(ctx, px + size * 0.1, py + size * 0.3, size * 0.5, 2, "#554a36");
+    pRect(ctx, px + size * 0.25, py + size * 0.1, size * 0.4, 2, "#63573f");
+    if (fv === 0) {
+      pRect(ctx, px + size * 0.7, py + size * 0.65, size * 0.25, 2, "#4a4030");
+    } else if (fv === 1) {
+      pRect(ctx, px + size * 0.08, py + size * 0.75, size * 0.3, 2, "#3d3527");
+    }
+    // Loose scree
+    pRect(ctx, px + size * 0.45, py + size * 0.22, 2, 2, "#6b5d42");
+    pRect(ctx, px + size * 0.6, py + size * 0.6, 2, 2, "#6b5d42");
+  }
+}
+
+/** Water: deep inland lake, impassable to every unit. */
+export function drawWaterTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#080e13");
+    pStroke(ctx, px, py, size, size, "#030609");
+    return;
+  }
+
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#0d2b40" : "#0f3148");
+  pStroke(ctx, px, py, size, size, "#081d2c");
+
+  // Ripples
+  const fv = h % 3;
+  if (size >= 8) {
+    pRect(ctx, px + size * 0.15, py + size * 0.35, size * 0.4, 1.5, "#1c5878");
+    pRect(ctx, px + size * 0.45, py + size * 0.62, size * 0.35, 1.5, "#174a66");
+    if (fv === 0) {
+      pRect(ctx, px + size * 0.6, py + size * 0.25, size * 0.25, 1.5, "#1c5878");
+    }
+    // Glint
+    pRect(ctx, px + size * 0.3, py + size * 0.3, 2, 2, "#2f7ea6");
+    pRect(ctx, px + size * 0.55, py + size * 0.55, 2, 2, "#2f7ea6");
+  }
+}
+
 export function drawImpassableTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
@@ -259,6 +368,81 @@ export function drawOreDeposit(
 }
 
 // ---------------------------------------------------------------------------
+// Crystal Deposit: Cyan strategic crystal field (ore is gold, crystal is cyan)
+// ---------------------------------------------------------------------------
+
+export function drawCrystalDeposit(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  size: number,
+  amount: number,
+  tick: number,
+): void {
+  const cx = px + size * 0.5;
+  const cy = py + size * 0.5;
+  const scale = Math.min(1.0, Math.max(0.5, amount / 200));
+  const s = size * 0.22 * scale;
+  const seed = (Math.floor(px * 23 + py * 41)) % 100;
+
+  // 1. Cool cyan ambient ground shimmer
+  const glowR = Math.floor(s * 1.5);
+  ctx.fillStyle = "rgba(8, 145, 178, 0.18)";
+  ctx.fillRect(Math.floor(cx - glowR), Math.floor(cy - glowR * 0.6), glowR * 2, glowR * 1.2);
+  ctx.fillStyle = "rgba(34, 211, 238, 0.12)";
+  ctx.fillRect(Math.floor(cx - glowR * 0.5), Math.floor(cy - glowR * 0.3), glowR, glowR * 0.6);
+
+  // 2. Compact dark bedrock nodule with cyan veins
+  pRect(ctx, cx - s * 0.85, cy + s * 0.05, s * 1.7, s * 0.45, "#18181b");
+  pRect(ctx, cx - s * 0.7, cy, s * 1.4, s * 0.25, "#27272a");
+  pRect(ctx, cx - s * 0.5, cy + s * 0.2, s * 0.4, 1.5, "#0891b2");
+  pRect(ctx, cx + s * 0.1, cy + s * 0.25, s * 0.45, 1.5, "#22d3ee");
+
+  // 3. Faceted cyan crystal shards
+  const crystals = [
+    { dx: -s * 0.55, dy: s * 0.1, w: Math.max(2.5, s * 0.28), h: s * 0.6, lean: -0.5, phase: 1.0 },
+    { dx: s * 0.5, dy: s * 0.12, w: Math.max(2.5, s * 0.26), h: s * 0.55, lean: 0.5, phase: 2.7 },
+    { dx: -s * 0.25, dy: -s * 0.05, w: Math.max(3, s * 0.34), h: s * 0.85, lean: -0.3, phase: 0.4 },
+    { dx: s * 0.25, dy: 0, w: Math.max(3, s * 0.35), h: s * 0.8, lean: 0.3, phase: 3.1 },
+    { dx: 0, dy: -s * 0.1, w: Math.max(3.5, s * 0.4), h: s * 0.95, lean: 0, phase: 4.5 },
+    { dx: s * 0.12, dy: s * 0.18, w: Math.max(2.5, s * 0.24), h: s * 0.45, lean: 0.5, phase: 5.2 },
+  ];
+
+  for (let i = 0; i < crystals.length; i++) {
+    const c = crystals[i];
+    const x = Math.floor(cx + c.dx);
+    const y = Math.floor(cy + c.dy);
+    const w = Math.floor(c.w);
+    const h = Math.floor(c.h);
+    const halfW = Math.floor(w / 2);
+    const shimmer = Math.sin(tick * 0.25 + c.phase + seed) > 0.4;
+
+    // Hard dark cyan outline
+    pRect(ctx, x - halfW - 1, y - h - 1, w + 2, h + 2, "#083344");
+    // Right darker cyan facet (East face)
+    pRect(ctx, x, y - h, halfW, h, "#0e7490");
+    pRect(ctx, x + 0.5, y - h + 1, Math.max(1, halfW - 1), h - 1, "#0891b2");
+    // Left bright sunlit cyan facet (West face)
+    pRect(ctx, x - halfW, y - h, halfW, h, "#06b6d4");
+    pRect(ctx, x - halfW + 0.5, y - h + 0.5, Math.max(1, halfW - 0.5), h - 1, "#22d3ee");
+    // Pointed crystal tip
+    pRect(ctx, x - 0.5 + c.lean, y - h - 1.5, 1.5, 1.5, "#a5f3fc");
+    if (shimmer) {
+      pRect(ctx, x - 1 + c.lean, y - h - 2, 2, 2, "#ffffff");
+      pRect(ctx, x - 2 + c.lean, y - h - 1, 4, 1, "#ffffff");
+    }
+  }
+
+  // 4. Floating cyan glint
+  const sporePhase = (tick * 0.1 + seed) % 10;
+  if (sporePhase < 4) {
+    const sporeY = cy - s * 0.5 - sporePhase * 1.5;
+    const sporeX = cx + Math.sin(tick * 0.2 + seed) * (s * 0.5);
+    pRect(ctx, sporeX, sporeY, 1.5, 1.5, "#a5f3fc");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Unit Sprites (Command & Conquer Chunky Pixel-Art Military Hardware)
 // ---------------------------------------------------------------------------
 
@@ -300,6 +484,15 @@ export function drawUnitSprite(
     case "Interceptor":
       drawInterceptor(ctx, zoom, pal, tick, firingAge);
       break;
+    case "Scout":
+      drawScout(ctx, zoom, pal, tick, firingAge);
+      break;
+    case "RocketTrooper":
+      drawRocketTrooper(ctx, zoom, pal, firingAge);
+      break;
+    case "SamLauncher":
+      drawSamLauncher(ctx, zoom, pal, firingAge);
+      break;
     default:
       pRect(ctx, -4, -4, 8, 8, pal.primary);
   }
@@ -315,7 +508,7 @@ function drawGunship(
   tick: number,
   firingAge: number = -1,
 ): void {
-  const s = Math.max(14, Math.floor(z * 0.38));
+  const s = Math.max(3, Math.floor(z * 0.40));
 
   // Drop shadow
   pRect(ctx, -s * 0.6, -s * 0.7 + 2, s * 1.2, s * 1.4, "rgba(0, 0, 0, 0.55)");
@@ -364,7 +557,7 @@ function drawInterceptor(
   tick: number,
   firingAge: number = -1,
 ): void {
-  const s = Math.max(14, Math.floor(z * 0.38));
+  const s = Math.max(3, Math.floor(z * 0.40));
 
   // Drop shadow
   pRect(ctx, -s * 0.65, -s * 0.75 + 2, s * 1.3, s * 1.5, "rgba(0, 0, 0, 0.55)");
@@ -411,7 +604,7 @@ function drawInfantry(
   firingAge: number = -1,
   isMoving: boolean = false,
 ): void {
-  const s = Math.max(12, Math.floor(z * 0.35));
+  const s = Math.max(3, Math.floor(z * 0.36));
 
   // Drop shadow
   pRect(ctx, -s * 0.4, -s * 0.25 + 2, s * 0.8, s * 0.5, "rgba(0, 0, 0, 0.55)");
@@ -463,7 +656,7 @@ function drawTank(
   _tick: number,
   firingAge: number = -1,
 ): void {
-  const s = Math.max(14, Math.floor(z * 0.4));
+  const s = Math.max(3, Math.floor(z * 0.42));
 
   // Recoil calculation: 0 = peak fire, 1 = heavy recoil, 2 = recovery, 3 = settling
   let recoil = 0;
@@ -557,7 +750,7 @@ function drawArtillery(
   _tick: number,
   firingAge: number = -1,
 ): void {
-  const s = Math.max(16, Math.floor(z * 0.42));
+  const s = Math.max(3, Math.floor(z * 0.42));
 
   // Recoil calculation
   let recoil = 0;
@@ -673,6 +866,12 @@ export function drawBuildingSprite(
     case "Turret":
       drawTurret(ctx, zoom, pal, heading, tick, firingAge);
       break;
+    case "CrystalRefinery":
+      drawCrystalRefinery(ctx, zoom, pal, tick);
+      break;
+    case "AATurret":
+      drawAATurret(ctx, zoom, pal, heading, tick, firingAge);
+      break;
     default:
       pRect(ctx, -zoom * 0.4, -zoom * 0.4, zoom * 0.8, zoom * 0.8, pal.primary);
   }
@@ -699,7 +898,7 @@ function drawHq(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(18, Math.floor(z * 0.55));
+  const r = Math.max(3, Math.floor(z * 0.47));
 
   // 1. Soft directional ground shadow (South-East projection)
   pRect(ctx, -r + 5, -r + 7, r * 2 + 5, r * 2 + 3, "rgba(0, 0, 0, 0.6)");
@@ -822,7 +1021,7 @@ function drawPowerPlant(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(16, Math.floor(z * 0.50));
+  const r = Math.max(3, Math.floor(z * 0.45));
 
   // 1. Soft directional ground shadow (South-East projection)
   pRect(ctx, -r + 4, -r + 6, r * 2 + 4, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -890,7 +1089,7 @@ function drawRefinery(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(18, Math.floor(z * 0.54));
+  const r = Math.max(3, Math.floor(z * 0.46));
 
   // 1. Ground shadow
   pRect(ctx, -r + 5, -r + 7, r * 2 + 5, r * 2 + 3, "rgba(0, 0, 0, 0.6)");
@@ -965,7 +1164,7 @@ function drawBarracks(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(16, Math.floor(z * 0.5));
+  const r = Math.max(3, Math.floor(z * 0.45));
 
   // 1. Ground shadow
   pRect(ctx, -r + 4, -r + 6, r * 2 + 4, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -1022,7 +1221,7 @@ function drawFactory(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(18, Math.floor(z * 0.54));
+  const r = Math.max(3, Math.floor(z * 0.46));
 
   // 1. Ground shadow
   pRect(ctx, -r + 5, -r + 7, r * 2 + 5, r * 2 + 3, "rgba(0, 0, 0, 0.6)");
@@ -1076,7 +1275,7 @@ function drawTechLab(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(16, Math.floor(z * 0.48));
+  const r = Math.max(3, Math.floor(z * 0.44));
 
   // 1. Ground shadow
   pRect(ctx, -r + 4, -r + 6, r * 2 + 4, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -1118,7 +1317,7 @@ function drawAirfield(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(18, Math.floor(z * 0.54));
+  const r = Math.max(3, Math.floor(z * 0.46));
 
   // 1. Ground shadow
   pRect(ctx, -r + 5, -r + 7, r * 2 + 5, r * 2 + 3, "rgba(0, 0, 0, 0.6)");
@@ -1189,7 +1388,7 @@ function drawRadar(
   pal: TeamPalette,
   tick: number,
 ): void {
-  const r = Math.max(16, Math.floor(z * 0.48));
+  const r = Math.max(3, Math.floor(z * 0.44));
 
   // 1. Ground shadow
   pRect(ctx, -r + 4, -r + 6, r * 2 + 4, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -1240,7 +1439,7 @@ function drawTeslaCoil(
   tick: number = 0,
   firingAge: number = -1,
 ): void {
-  const r = Math.max(15, Math.floor(z * 0.45));
+  const r = Math.max(3, Math.floor(z * 0.44));
 
   // 1. Ground shadow
   pRect(ctx, -r + 4, -r + 5, r * 2 + 3, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -1294,7 +1493,7 @@ function drawMammothTank(
   pal: TeamPalette,
   firingAge: number = -1,
 ): void {
-  const s = Math.max(20, Math.floor(z * 0.5));
+  const s = Math.max(3, Math.floor(z * 0.46));
 
   // 1. Drop shadow
   pRect(ctx, -s * 0.7, -s * 0.7 + 2, s * 1.4, s * 1.4, "rgba(0, 0, 0, 0.55)");
@@ -1349,7 +1548,7 @@ function drawTurret(
   tick: number = 0,
   firingAge: number = -1,
 ): void {
-  const r = Math.max(15, Math.floor(z * 0.45));
+  const r = Math.max(3, Math.floor(z * 0.44));
 
   // 1. Ground shadow
   pRect(ctx, -r + 4, -r + 5, r * 2 + 3, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
@@ -1970,6 +2169,82 @@ export function drawTacticalIcon(
     pRect(ctx, 3, 10, 2, 6, "#facc15");
     pRect(ctx, -4, 14, 2, 3, "#ffffff");
     pRect(ctx, 3, 14, 2, 3, "#ffffff");
+  } else if (norm === "scout") {
+    // Light recon buggy
+    pRect(ctx, -16, -13, 32, 6, "#1e293b");
+    pRect(ctx, -15, -12, 30, 4, "#334155");
+    pRect(ctx, -16, 7, 32, 6, "#1e293b");
+    pRect(ctx, -15, 8, 30, 4, "#334155");
+    pRect(ctx, -15, -7, 30, 14, "#1d4ed8");
+    pRect(ctx, -13, -6, 26, 12, "#2563eb");
+    pRect(ctx, -11, -5, 22, 10, "#3b82f6");
+    // Roll cage
+    pRect(ctx, -9, -12, 4, 8, "#64748b");
+    pRect(ctx, 5, -12, 4, 8, "#64748b");
+    pRect(ctx, -9, -13, 18, 3, "#64748b");
+    // Machine gun
+    pRect(ctx, 6, -15, 9, 3, "#334155");
+    pRect(ctx, 8, -14, 7, 2, "#94a3b8");
+    // Whip antenna
+    pRect(ctx, -14, -18, 2, 7, "#94a3b8");
+    pRect(ctx, -15, -19, 4, 2, "#38bdf8");
+  } else if (norm === "rockettrooper") {
+    // Infantry with shoulder rocket tube
+    pRect(ctx, -9, -1, 18, 16, "#1e3a8a");
+    pRect(ctx, -8, 0, 16, 14, "#1d4ed8");
+    pRect(ctx, -6, 2, 12, 10, "#2563eb");
+    pRect(ctx, -6, 6, 4, 5, "#334155");
+    pRect(ctx, 2, 6, 4, 5, "#334155");
+    pRect(ctx, -9, -14, 18, 12, "#1e293b");
+    pRect(ctx, -8, -13, 16, 10, "#1d4ed8");
+    pRect(ctx, -7, -6, 14, 5, "#0284c7");
+    // Rocket tube on shoulder
+    pRect(ctx, 3, -12, 14, 5, "#334155");
+    pRect(ctx, 5, -11, 11, 3, "#64748b");
+    pRect(ctx, 14, -13, 4, 7, "#09090b");
+    pRect(ctx, 16, -12, 2, 5, "#facc15");
+  } else if (norm === "samlauncher") {
+    // Wheeled AA missile truck
+    pRect(ctx, -16, 6, 32, 6, "#1e293b");
+    pRect(ctx, -15, 7, 30, 4, "#334155");
+    pRect(ctx, -16, -1, 32, 7, "#1d4ed8");
+    pRect(ctx, -14, 0, 28, 5, "#2563eb");
+    // Missile pod
+    pRect(ctx, -2, -16, 9, 15, "#334155");
+    pRect(ctx, -1, -15, 7, 13, "#64748b");
+    pRect(ctx, 0, -14, 5, 2, "#1f2937");
+    pRect(ctx, 0, -8, 5, 2, "#1f2937");
+    // Cab + dish
+    pRect(ctx, -16, -8, 7, 7, "#475569");
+    pRect(ctx, -18, -11, 11, 3, "#94a3b8");
+  } else if (norm === "crystalrefinery") {
+    // Refinery with cyan crystal vat
+    pRect(ctx, -17, -10, 8, 20, "#1e293b");
+    pRect(ctx, -16, -9, 6, 18, "#334155");
+    pRect(ctx, -8, -10, 8, 20, "#1e293b");
+    pRect(ctx, -7, -9, 6, 18, "#334155");
+    pRect(ctx, -16, 4, 32, 9, "#1d4ed8");
+    pRect(ctx, -14, 5, 28, 7, "#2563eb");
+    // Crystal vat
+    pRect(ctx, -8, -2, 16, 8, "#164e63");
+    pRect(ctx, -6, -1, 12, 6, "#0891b2");
+    pRect(ctx, -4, 0, 8, 4, "#67e8f9");
+    pRect(ctx, -1, -3, 3, 4, "#a5f3fc");
+    pRect(ctx, -2, -4, 4, 2, "#cffafe");
+  } else if (norm === "aaturret") {
+    // Point-defense turret with missile pods
+    pRect(ctx, -16, 4, 32, 8, "#1e293b");
+    pRect(ctx, -15, 5, 30, 6, "#334155");
+    pRect(ctx, -9, -6, 18, 10, "#1d4ed8");
+    pRect(ctx, -8, -5, 16, 8, "#2563eb");
+    // Twin pods
+    pRect(ctx, -8, -14, 16, 4, "#334155");
+    pRect(ctx, -7, -13, 14, 2, "#64748b");
+    pRect(ctx, -8, 2, 16, 4, "#334155");
+    pRect(ctx, -7, 3, 14, 2, "#64748b");
+    // Sensor dome
+    pRect(ctx, -4, -4, 8, 8, "#0e7490");
+    pRect(ctx, -3, -3, 6, 6, "#67e8f9");
   } else if (norm === "play") {
     pRect(ctx, -6, -10, 12, 20, color);
   } else if (norm === "pause") {
@@ -1986,6 +2261,271 @@ export function drawTacticalIcon(
 }
 
 const thumbnailCache = new Map<string, string>();
+
+// ---------------------------------------------------------------------------
+// v2 roster sprites: recon scout, rocket trooper, SAM launcher, crystal
+// refinery, and the anti-air turret (all single-tile, tile-proportional).
+// ---------------------------------------------------------------------------
+
+/** Scout: Lightweight recon buggy — fast, fragile, wide eyes (+X is forward). */
+function drawScout(
+  ctx: CanvasRenderingContext2D,
+  z: number,
+  pal: TeamPalette,
+  _tick: number,
+  firingAge: number = -1,
+): void {
+  const s = Math.max(3, Math.floor(z * 0.38));
+
+  pRect(ctx, -s * 0.7, -s * 0.4 + 2, s * 1.4, s * 0.8, "rgba(0, 0, 0, 0.55)");
+
+  // Open wheels
+  pRect(ctx, -s * 0.6, -s * 0.35, s * 0.26, s * 0.5, "#09090b");
+  pRect(ctx, -s * 0.58, -s * 0.33, s * 0.2, s * 0.44, "#3f3f46");
+  pRect(ctx, s * 0.34, -s * 0.35, s * 0.26, s * 0.5, "#09090b");
+  pRect(ctx, s * 0.36, -s * 0.33, s * 0.2, s * 0.44, "#3f3f46");
+
+  // Low chassis
+  pRect(ctx, -s * 0.5, -s * 0.28, s * 1.0, s * 0.36, "#27272a");
+  pRect(ctx, -s * 0.42, -s * 0.23, s * 0.84, s * 0.26, pal.primaryDark);
+  pRect(ctx, -s * 0.4, -s * 0.2, s * 0.8, s * 0.2, pal.primary);
+
+  // Roll cage
+  pRect(ctx, -s * 0.2, -s * 0.6, s * 0.12, s * 0.36, "#52525b");
+  pRect(ctx, s * 0.22, -s * 0.6, s * 0.12, s * 0.36, "#52525b");
+  pRect(ctx, -s * 0.22, -s * 0.62, s * 0.56, s * 0.09, "#52525b");
+
+  // Gunner + pintle machine gun
+  pRect(ctx, -s * 0.04, -s * 0.55, s * 0.2, s * 0.3, pal.primary);
+  pRect(ctx, s * 0.16, -s * 0.62, s * 0.55, s * 0.09, "#09090b");
+  if (firingAge === 0 || firingAge === 1) {
+    pRect(ctx, s * 0.7, -s * 0.64, 4, 3, "#fef08a");
+    pRect(ctx, s * 0.75, -s * 0.62, 2, 2, "#ffffff");
+  }
+
+  // Whip antenna with blinking tip
+  pRect(ctx, -s * 0.55, -s * 0.9, 1.5, s * 0.38, "#94a3b8");
+  if (Math.floor(performance.now() / 300) % 2 === 0) {
+    pRect(ctx, -s * 0.55, -s * 0.95, 3, 1.5, pal.accent);
+  }
+}
+
+/** RocketTrooper: Infantry with a shoulder-fired anti-armor/AA rocket tube. */
+function drawRocketTrooper(
+  ctx: CanvasRenderingContext2D,
+  z: number,
+  pal: TeamPalette,
+  firingAge: number = -1,
+): void {
+  const s = Math.max(3, Math.floor(z * 0.36));
+
+  pRect(ctx, -s * 0.4, -s * 0.25 + 2, s * 0.8, s * 0.5, "rgba(0, 0, 0, 0.55)");
+
+  // Combat boots
+  pRect(ctx, -s * 0.45, -s * 0.35, s * 0.3, s * 0.2, "#09090b");
+  pRect(ctx, -s * 0.45, s * 0.15, s * 0.3, s * 0.2, "#09090b");
+
+  // Camo fatigue torso
+  pRect(ctx, -s * 0.35, -s * 0.3, s * 0.65, s * 0.6, "#27272a");
+  pRect(ctx, -s * 0.25, -s * 0.25, s * 0.45, s * 0.5, pal.primary);
+
+  // Shoulder rocket launcher tube (angled up, +X is forward)
+  const kick = firingAge === 0 ? -2 : 0;
+  pRect(ctx, s * 0.05 + kick, -s * 0.62, s * 0.75, s * 0.22, "#09090b");
+  pRect(ctx, s * 0.07 + kick, -s * 0.59, s * 0.7, s * 0.16, "#3f3f46");
+  pRect(ctx, s * 0.72 + kick, -s * 0.66, s * 0.2, s * 0.3, "#18181b");
+  pRect(ctx, s * 0.78 + kick, -s * 0.62, 2, s * 0.22, "#facc15");
+
+  // Backblast + muzzle flash on fire
+  if (firingAge >= 0 && firingAge <= 2) {
+    pRect(ctx, s * 0.05 + kick, -s * 0.68, 5, 3, "#f97316");
+    pRect(ctx, s * 0.9 + kick, -s * 0.64, 4, 3, "#fef08a");
+    pRect(ctx, s * 0.94 + kick, -s * 0.62, 2, 2, "#ffffff");
+  }
+
+  // Helmet / head
+  const headW = Math.max(6, Math.floor(s * 0.5));
+  pRect(ctx, -s * 0.25, -headW / 2, headW, headW, "#18181b");
+  pRect(ctx, -s * 0.15, -headW / 2 + 1, headW - 2, headW - 2, pal.primaryDark);
+  pRect(ctx, s * 0.05, -headW * 0.3, 2, headW * 0.6, pal.accent);
+}
+
+/** SamLauncher: Wheeled surface-to-air missile launcher (+X is forward). */
+function drawSamLauncher(
+  ctx: CanvasRenderingContext2D,
+  z: number,
+  pal: TeamPalette,
+  firingAge: number = -1,
+): void {
+  const s = Math.max(3, Math.floor(z * 0.4));
+
+  pRect(ctx, -s * 0.8, -s * 0.5 + 2, s * 1.6, s * 1.0, "rgba(0, 0, 0, 0.55)");
+
+  // Three wheels
+  pRect(ctx, -s * 0.72, -s * 0.2, s * 0.2, s * 0.42, "#09090b");
+  pRect(ctx, -s * 0.22, -s * 0.2, s * 0.2, s * 0.42, "#09090b");
+  pRect(ctx, s * 0.52, -s * 0.2, s * 0.2, s * 0.42, "#09090b");
+
+  // Truck bed chassis
+  pRect(ctx, -s * 0.7, -s * 0.38, s * 1.4, s * 0.32, "#27272a");
+  pRect(ctx, -s * 0.62, -s * 0.33, s * 1.24, s * 0.22, pal.primaryDark);
+  pRect(ctx, -s * 0.6, -s * 0.3, s * 1.2, s * 0.16, pal.primary);
+
+  // Angled missile pod (three tubes)
+  const podH = Math.floor(s * 0.8);
+  pRect(ctx, s * 0.02, -s * 0.9, s * 0.52, podH, "#09090b");
+  pRect(ctx, s * 0.09, -s * 0.83, s * 0.38, podH - 0.5, "#3f3f46");
+  for (let i = 0; i < 3; i++) {
+    pRect(ctx, s * 0.13, -s * 0.83 + i * (podH / 3), s * 0.3, 1.5, "#1f2937");
+  }
+
+  // Launch flash
+  if (firingAge >= 0 && firingAge <= 2) {
+    pRect(ctx, s * 0.52, -s * 0.9, 6, 5, "#fef08a");
+    pRect(ctx, s * 0.55, -s * 0.86, 3, 3, "#ffffff");
+  }
+
+  // Cab + tracking dish
+  pRect(ctx, -s * 0.6, -s * 0.72, s * 0.3, s * 0.3, "#334155");
+  pRect(ctx, -s * 0.68, -s * 0.88, s * 0.46, s * 0.12, "#94a3b8");
+}
+
+/** CrystalRefinery: Refinery built on a cyan crystal field. */
+function drawCrystalRefinery(
+  ctx: CanvasRenderingContext2D,
+  z: number,
+  pal: TeamPalette,
+  tick: number,
+): void {
+  const r = Math.max(3, Math.floor(z * 0.46));
+
+  // Shadow + concrete foundation
+  pRect(ctx, -r + 5, -r + 7, r * 2 + 5, r * 2 + 3, "rgba(0, 0, 0, 0.6)");
+  pRect(ctx, -r, -r, r * 2, r * 2, "#090d16");
+  pRect(ctx, -r + 1, -r + 1, r * 2 - 2, r * 2 - 2, "#0f172a");
+
+  // Twin cryo-cooling stacks (North-West), teal-tipped
+  const stackW = Math.max(6, Math.floor(r * 0.34));
+  const stackH = Math.floor(r * 1.0);
+  const stackY = -r * 1.02;
+  for (const sx of [-r * 0.88, -r * 0.42]) {
+    pRect(ctx, sx, stackY, stackW, stackH, "#090d16");
+    pRect(ctx, sx + 1, stackY + 1, stackW - 2, stackH - 2, "#1e293b");
+    pRect(ctx, sx + 1, stackY + 1, 1.5, stackH - 2, "#334155");
+    pRect(ctx, sx, stackY + stackH * 0.35, stackW, 2, "#090d16");
+    pRect(ctx, sx, stackY + stackH * 0.7, stackW, 2, "#090d16");
+    pRect(ctx, sx + 1, stackY - 3, stackW - 2, 3, "#0e7490");
+  }
+
+  // Cold vapor puffs
+  const puff = Math.floor((tick * 0.25) % 4);
+  pRect(ctx, -r * 0.88 + puff - 1, stackY - puff * 3 - 4, 5 + puff, 4 + puff, "#67e8f9");
+  pRect(ctx, -r * 0.42 + puff - 1, stackY - puff * 3 - 6, 4 + puff, 3 + puff, "#a5f3fc");
+
+  // Crystal storage silo (North-East)
+  const siloW = Math.floor(r * 0.7);
+  const siloH = Math.floor(r * 0.9);
+  pRect(ctx, r * 0.15, -r * 0.9, siloW, siloH, "#090d16");
+  pRect(ctx, r * 0.15 + 1, -r * 0.9 + 1, siloW - 2, siloH - 2, pal.primary);
+  pRect(ctx, r * 0.15 + 2, -r * 0.9 + 1, 1.5, siloH - 2, pal.primaryLight);
+  pRect(ctx, r * 0.15 + siloW - 4, -r * 0.9 + 3, 2, 2, "#22d3ee");
+  pRect(ctx, r * 0.15 + siloW - 4, -r * 0.9 + 7, 2, 2, "#22d3ee");
+  pRect(ctx, r * 0.15 + siloW - 4, -r * 0.9 + 11, 2, 2, "#0e7490");
+
+  // Central glowing crystal processing vat
+  const vatW = Math.floor(r * 1.2);
+  const vatH = Math.floor(r * 0.52);
+  pRect(ctx, -vatW / 2, -r * 0.1, vatW, vatH, "#090d16");
+  pRect(ctx, -vatW / 2 + 1, -r * 0.1 + 1, vatW - 2, vatH - 2, "#155e75");
+  pRect(ctx, -vatW / 2 + 2, -r * 0.1 + 2, vatW - 4, vatH - 4, "#0891b2");
+  pRect(ctx, -vatW / 2 + 4, -r * 0.1 + 4, vatW - 8, vatH - 8, "#67e8f9");
+
+  // Rising shard pixel
+  const bubble = Math.sin(tick * 0.3) > 0 ? 1 : -1;
+  pRect(ctx, -2 + bubble * 5, -r * 0.1 + 4, 3, 3, "#cffafe");
+
+  // Unloading dock with hazard ramp
+  const dockW = Math.floor(r * 1.35);
+  const dockH = Math.floor(r * 0.6);
+  pRect(ctx, -dockW / 2, r * 0.35, dockW, dockH, "#090d16");
+  pRect(ctx, -dockW / 2 + 1, r * 0.35 + 1, dockW - 2, dockH - 2, pal.primaryDark);
+  pRect(ctx, -dockW * 0.35, r * 0.38, dockW * 0.7, dockH * 0.55, "#164e63");
+  pHazard(ctx, -dockW / 2 + 2, r * 0.72, dockW - 4, 3);
+}
+
+/** AATurret: Point-defense turret with twin anti-air missile pods. */
+function drawAATurret(
+  ctx: CanvasRenderingContext2D,
+  z: number,
+  pal: TeamPalette,
+  heading: number = 0,
+  tick: number = 0,
+  firingAge: number = -1,
+): void {
+  const r = Math.max(3, Math.floor(z * 0.44));
+
+  // Shadow + circular concrete barbette
+  pRect(ctx, -r + 4, -r + 5, r * 2 + 3, r * 2 + 2, "rgba(0, 0, 0, 0.6)");
+  pRect(ctx, -r, -r, r * 2, r * 2, "#090d16");
+  pRect(ctx, -r + 1, -r + 1, r * 2 - 2, r * 2 - 2, "#1e293b");
+  const boltR = r - 3;
+  const boltPositions = [
+    [-boltR, -boltR], [0, -boltR - 1], [boltR, -boltR],
+    [-boltR - 1, 0], [boltR + 1, 0],
+    [-boltR, boltR], [0, boltR + 1], [boltR, boltR],
+  ];
+  for (const [bx, by] of boltPositions) {
+    pRect(ctx, bx, by, 2, 2, "#64748b");
+  }
+
+  // Rotating turret with twin missile pods (aimed by heading)
+  ctx.save();
+  ctx.rotate(heading);
+
+  const podLen = Math.floor(r * 1.35);
+  const podW = Math.max(3, Math.floor(r * 0.3));
+  const spacing = Math.floor(r * 0.52);
+
+  let recoilLeft = 0;
+  let recoilRight = 0;
+  if (firingAge >= 0 && firingAge <= 3) {
+    const rAmt = (3 - firingAge) * 1.5;
+    if (tick % 2 === 0) recoilLeft = rAmt;
+    else recoilRight = rAmt;
+  }
+
+  // Left pod
+  pRect(ctx, -recoilLeft, -spacing - podW / 2, podLen, podW, "#09090b");
+  pRect(ctx, -recoilLeft + 1, -spacing - podW / 2 + 0.5, podLen - 2, podW - 1, "#475569");
+  pRect(ctx, podLen - recoilLeft - 3, -spacing - podW / 2 - 1, 3, podW + 2, "#181f2a");
+
+  // Right pod
+  pRect(ctx, -recoilRight, spacing - podW / 2, podLen, podW, "#09090b");
+  pRect(ctx, -recoilRight + 1, spacing - podW / 2 + 0.5, podLen - 2, podW - 1, "#475569");
+  pRect(ctx, podLen - recoilRight - 3, spacing - podW / 2 - 1, 3, podW + 2, "#181f2a");
+
+  // Launch flashes
+  if (firingAge >= 0 && firingAge <= 1) {
+    const flashSize = Math.floor(r * 0.45);
+    if (recoilLeft > 0) {
+      pRect(ctx, podLen - recoilLeft, -spacing - flashSize / 2, flashSize * 1.2, flashSize, "#fef08a");
+      pRect(ctx, podLen - recoilLeft + 1, -spacing - flashSize / 4, flashSize * 0.7, flashSize / 2, "#ffffff");
+    }
+    if (recoilRight > 0) {
+      pRect(ctx, podLen - recoilRight, spacing - flashSize / 2, flashSize * 1.2, flashSize, "#fef08a");
+      pRect(ctx, podLen - recoilRight + 1, spacing - flashSize / 4, flashSize * 0.7, flashSize / 2, "#ffffff");
+    }
+  }
+
+  // Beveled cupola with sensor dome
+  const cupW = Math.floor(r * 0.95);
+  pRect(ctx, -cupW / 2, -cupW / 2, cupW, cupW, "#09090b");
+  pRect(ctx, -cupW / 2 + 1, -cupW / 2 + 1, cupW - 2, cupW - 2, pal.primaryDark);
+  pRect(ctx, -cupW / 2 + 2, -cupW / 2 + 2, cupW - 4, cupW - 4, pal.primary);
+  pRect(ctx, -3, -3, 6, 6, "#0e7490");
+  pRect(ctx, -2, -2, 4, 4, "#67e8f9");
+  ctx.restore();
+}
 
 export function getThumbnailDataUrl(kind: string, _owner: number = 0): string {
   const cached = thumbnailCache.get(kind);

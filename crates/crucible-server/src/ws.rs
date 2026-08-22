@@ -66,6 +66,9 @@ struct MatchStartMsg {
     map_seed: u64,
     player: u8,
     passable: Vec<bool>,
+    /// Serde terrain names per tile ("Plains", "Forest", …) so the client
+    /// renders the same typed terrain the sim moves/defends on.
+    terrain: Vec<String>,
     hq: [(u8, u8); 2],
 }
 
@@ -76,12 +79,14 @@ struct StateDiffMsg {
     /// Index of the player whose turn it is (0 = P0/human, 1 = P1/bot).
     active_player: u8,
     ore: i32,
+    /// Banked strategic crystal (spent on the deep research).
+    crystal: i32,
     power_produced: i32,
     power_consumed: i32,
-    /// The player's currently researched upgrade ("None" before any research).
-    upgrade: String,
+    research: ResearchMsg,
     entities: Vec<DiffEntity>,
     ore_tiles: Vec<OreTile>,
+    crystal_tiles: Vec<CrystalTile>,
     visible: Vec<u16>,
     events: Vec<DiffEvent>,
 }
@@ -133,6 +138,22 @@ struct OreTile {
     x: u8,
     y: u8,
     amount: i32,
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct CrystalTile {
+    x: u8,
+    y: u8,
+    amount: i32,
+}
+
+/// The player's research dashboard: the accruing point pool, the tech being
+/// worked on (serde name, if any), and the completed technologies.
+#[derive(Serialize, Clone, Debug)]
+struct ResearchMsg {
+    points: i32,
+    researching: Option<String>,
+    researched: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -230,6 +251,7 @@ async fn run(
     let mut replay = Replay::new(seed, config);
 
     let passable = game.map.passable.clone();
+    let terrain: Vec<String> = game.map.terrain.iter().map(|t| format!("{t:?}")).collect();
     let hq = [game.map.hq_tiles[0], game.map.hq_tiles[1]];
 
     sender
@@ -238,6 +260,7 @@ async fn run(
                 map_seed: seed,
                 player: Player::P0.index() as u8,
                 passable,
+                terrain,
                 hq,
             }))?
             .into(),
@@ -280,6 +303,16 @@ async fn run(
     });
 
     let mut last_event_turn = -1i32;
+
+    // Broadcast the player's starting position immediately, before waiting
+    // for any input: the client needs the base, its terrain, and its resources
+    // from the very first frame (there is no realtime tick pump to surface
+    // them otherwise — without this the player stares at empty fog until they
+    // happen to issue a command).
+    let initial_diff = build_diff(&game, &mut last_event_turn);
+    sender
+        .send(Message::Text(serde_json::to_string(&initial_diff)?.into()))
+        .await?;
 
     // Run the match. If the client disconnects (or a send fails) mid-match,
     // the error surfaces here with the replay state intact, so the match is
@@ -517,6 +550,16 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             });
         }
     }
+    let mut crystal_tiles = Vec::new();
+    for idx in 0..(64 * 64) {
+        if view.known_crystal[idx] && game.map.crystal[idx] > 0 {
+            crystal_tiles.push(CrystalTile {
+                x: (idx % 64) as u8,
+                y: (idx / 64) as u8,
+                amount: game.map.crystal[idx],
+            });
+        }
+    }
 
     let visible: Vec<u16> = view
         .visible
@@ -534,7 +577,8 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             turn: e.turn,
             kind: event_kind(&e.kind),
             amount: match &e.kind {
-                crucible_sim::EventKind::OreMined { amount, .. } => Some(*amount),
+                crucible_sim::EventKind::OreMined { amount, .. }
+                | crucible_sim::EventKind::CrystalMined { amount, .. } => Some(*amount),
                 crucible_sim::EventKind::Sold { refund, .. } => Some(*refund),
                 _ => None,
             },
@@ -544,15 +588,26 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
     *last_event_turn = game.turn;
     let (power_produced, power_consumed) = game.power(crucible_sim::Player::P0);
 
+    let research = &game.research[0];
     ServerMsg::StateDiff(StateDiffMsg {
         turn: game.turn,
         active_player: game.active.index() as u8,
         ore: game.ore[0],
+        crystal: game.crystal[0],
         power_produced,
         power_consumed,
-        upgrade: format!("{:?}", game.upgrades[0]),
+        research: ResearchMsg {
+            points: research.points,
+            researching: research.researching.map(|t| format!("{t:?}")),
+            researched: research
+                .researched
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect(),
+        },
         entities,
         ore_tiles,
+        crystal_tiles,
         visible,
         events,
     })
@@ -566,8 +621,10 @@ fn event_player(game: &Game, event: &crucible_sim::EventKind) -> Option<Player> 
         crucible_sim::EventKind::BuildingPlaced { player, .. }
         | crucible_sim::EventKind::UnitTrained { player, .. }
         | crucible_sim::EventKind::OreMined { player, .. }
-        | crucible_sim::EventKind::Sold { player, .. }
-        | crucible_sim::EventKind::UpgradeChosen { player, .. } => Some(*player),
+        | crucible_sim::EventKind::CrystalMined { player, .. }
+        | crucible_sim::EventKind::ResearchStarted { player, .. }
+        | crucible_sim::EventKind::ResearchComplete { player, .. }
+        | crucible_sim::EventKind::Sold { player, .. } => Some(*player),
         crucible_sim::EventKind::UnitDied { owner, .. }
         | crucible_sim::EventKind::BuildingDestroyed { owner, .. } => Some(*owner),
         crucible_sim::EventKind::Attacked { target, .. } => game
@@ -618,12 +675,16 @@ fn event_kind(e: &crucible_sim::EventKind) -> String {
         crucible_sim::EventKind::UnitDied { .. } => "unit_died".into(),
         crucible_sim::EventKind::BuildingDestroyed { .. } => "building_destroyed".into(),
         crucible_sim::EventKind::OreMined { .. } => "ore_mined".into(),
+        crucible_sim::EventKind::CrystalMined { .. } => "crystal_mined".into(),
         crucible_sim::EventKind::BuildingPlaced { btype, .. } => {
             format!("built:{btype:?}").to_lowercase()
         }
         crucible_sim::EventKind::Sold { .. } => "sold".into(),
-        crucible_sim::EventKind::UpgradeChosen { upgrade, .. } => {
-            format!("upgrade:{upgrade:?}").to_lowercase()
+        crucible_sim::EventKind::ResearchStarted { tech, .. } => {
+            format!("research:{tech:?}").to_lowercase()
+        }
+        crucible_sim::EventKind::ResearchComplete { tech, .. } => {
+            format!("researched:{tech:?}").to_lowercase()
         }
         crucible_sim::EventKind::Attacked { .. } => "attacked".into(),
     }
@@ -745,9 +806,9 @@ mod tests {
             },
             GameEvent {
                 turn: 1,
-                kind: EventKind::UpgradeChosen {
+                kind: EventKind::ResearchStarted {
                     player: Player::P1,
-                    upgrade: crucible_sim::Upgrade::Damage,
+                    tech: crucible_sim::tech::TechId::HighExplosive,
                 },
             },
         ];

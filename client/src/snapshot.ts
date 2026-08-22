@@ -3,7 +3,7 @@
 // sim state into the shapes the renderer already draws. Kept wasm-free so it
 // is unit-testable.
 
-import type { DiffEntity, OreTile } from "./types";
+import type { CrystalTile, DiffEntity, OreTile } from "./types";
 import { World } from "./world";
 
 const MAP = 64;
@@ -23,8 +23,10 @@ export interface FrameEntity {
 export interface ReplayMeta {
   map_seed: number;
   passable: boolean[];
+  terrain: string[];
   hq_tiles: [number, number][];
   ore: number[];
+  crystal: number[];
   duration_turns: number;
   winner: number | null;
   win_reason: string | null;
@@ -46,12 +48,16 @@ export interface ReplayFrame {
 export function applyMeta(world: World, meta: ReplayMeta): void {
   world.mapSeed = meta.map_seed;
   world.passable = meta.passable;
+  world.terrain = meta.terrain ?? [];
   world.hq = meta.hq_tiles;
   world.oreTiles = new Map<string, OreTile>();
+  world.crystalTiles = new Map<string, CrystalTile>();
   for (let y = 0; y < MAP; y++) {
     for (let x = 0; x < MAP; x++) {
       const amount = meta.ore[y * MAP + x];
       if (amount > 0) world.oreTiles.set(`${x},${y}`, { x, y, amount });
+      const cAmount = (meta.crystal ?? [])[y * MAP + x] ?? 0;
+      if (cAmount > 0) world.crystalTiles.set(`${x},${y}`, { x, y, amount: cAmount });
     }
   }
   // Spectate shows the whole map: no fog.

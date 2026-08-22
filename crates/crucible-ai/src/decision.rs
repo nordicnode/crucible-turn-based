@@ -9,7 +9,9 @@
 //! this layer only produces the action commands.
 
 use crucible_sim::{
-    tiles::chebyshev, unit_stats, BuildingType, Command, EntityId, Game, Player, UnitType, Upgrade,
+    tech::{prereqs_met, tech_info, TechId},
+    tiles::chebyshev,
+    unit_stats, BuildingType, Command, EntityId, Game, Player, UnitType,
 };
 
 use crate::features::{extract, FeatureInput};
@@ -36,8 +38,15 @@ const TRAIN_TYPES: [UnitType; TRAIN_OUT] = [
     UnitType::Gunship,
     UnitType::Interceptor,
 ];
-const TECH_TYPES: [Upgrade; TECH_OUT] =
-    [Upgrade::None, Upgrade::Damage, Upgrade::Hp, Upgrade::Range];
+/// The four research actions the tech head can pick (schema v7: the old
+/// damage/hp/range upgrades became technologies). The network scores them;
+/// the decision layer masks the illegal ones.
+const TECH_TYPES: [TechId; TECH_OUT] = [
+    TechId::HighExplosive,
+    TechId::CompositeArmor,
+    TechId::TargetingOptics,
+    TechId::EfficientRefining,
+];
 
 /// Actions only fire when their winning score clears this threshold.
 const THRESHOLD: f32 = 0.0;
@@ -229,28 +238,18 @@ pub fn decide(
 
     // --- Tech head ----------------------------------------------------------
     let tech_base = sector_base + SECTOR_OUT;
-    let mut best_tech: Option<(f32, Upgrade)> = None;
+    let mut best_tech: Option<(f32, TechId)> = None;
     for i in 0..TECH_OUT {
-        let up = TECH_TYPES[i];
-        if up != Upgrade::None && tech_allowed(game, player, up) {
+        let tech = TECH_TYPES[i];
+        if tech_allowed(game, player, tech) {
             let s = out[tech_base + i];
             if s > THRESHOLD && best_tech.is_none_or(|(bs, _)| s > bs) {
-                best_tech = Some((s, up));
+                best_tech = Some((s, tech));
             }
         }
     }
-    if let Some((_, up)) = best_tech {
-        if let Some(lab) = game
-            .buildings
-            .iter()
-            .find(|b| b.owner == player && b.btype == BuildingType::TechLab)
-        {
-            cmds.push(Command::ChooseUpgrade {
-                player,
-                lab: lab.id,
-                upgrade: up,
-            });
-        }
+    if let Some((_, tech)) = best_tech {
+        cmds.push(Command::StartResearch { player, tech });
     }
 
     cmds
@@ -395,6 +394,10 @@ fn build_preferred(game: &Game, p: Player, bt: BuildingType) -> Option<(u8, u8)>
         BuildingType::Radar => base_offset(hq_tile, -4, 2),
         BuildingType::TeslaCoil => base_offset(hq_tile, 2, -2),
         BuildingType::Turret => base_offset(hq_tile, -2, 0),
+        // Refineries ignore the preferred tile (they must touch their field),
+        // but the anchor biases the search toward the base pockets.
+        BuildingType::CrystalRefinery => base_offset(hq_tile, 3, 0),
+        BuildingType::AATurret => base_offset(hq_tile, -3, 0),
         BuildingType::Hq => hq_tile,
     })
 }
@@ -409,6 +412,12 @@ fn train_allowed(game: &Game, p: Player, ut: UnitType) -> bool {
     {
         return false;
     }
+    // Research-gated units need the tech researched, not just a lab built.
+    if let Some(tech) = crucible_sim::entity::unit_requires_tech(ut) {
+        if !game.research[p.index()].has(tech) {
+            return false;
+        }
+    }
     if game.ore[p.index()] < unit_stats(ut).cost {
         return false;
     }
@@ -421,18 +430,21 @@ fn train_allowed(game: &Game, p: Player, ut: UnitType) -> bool {
 fn producer_for(ut: UnitType) -> BuildingType {
     match ut {
         UnitType::Tank | UnitType::Artillery | UnitType::MammothTank => BuildingType::Factory,
+        UnitType::SamLauncher => BuildingType::Factory,
         UnitType::Infantry => BuildingType::Barracks,
+        UnitType::Scout | UnitType::RocketTrooper => BuildingType::Barracks,
         UnitType::Gunship | UnitType::Interceptor => BuildingType::Airfield,
     }
 }
 
-fn tech_allowed(game: &Game, p: Player, up: Upgrade) -> bool {
-    game.upgrades[p.index()] == Upgrade::None
-        && game
-            .buildings
-            .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::TechLab)
-        && up != Upgrade::None
+fn tech_allowed(game: &Game, p: Player, tech: TechId) -> bool {
+    game.buildings
+        .iter()
+        .any(|b| b.owner == p && b.btype == BuildingType::TechLab)
+        && !game.research[p.index()].has(tech)
+        && game.research[p.index()].researching.is_none()
+        && prereqs_met(tech, &game.research[p.index()].researched)
+        && tech_info(tech).crystal_cost <= game.crystal[p.index()]
 }
 
 #[cfg(test)]
@@ -675,9 +687,21 @@ mod tests {
         assert!(train_allowed(&g, Player::P0, UnitType::Artillery));
         // MammothTank trains from the Factory.
         assert_eq!(producer_for(UnitType::MammothTank), BuildingType::Factory);
-        // All three research options are reachable before an upgrade is chosen.
-        for up in [Upgrade::Damage, Upgrade::Hp, Upgrade::Range] {
-            assert!(tech_allowed(&g, Player::P0, up));
+        // The tier-1 research options are all reachable with a lab built and
+        // research idle; a second start is masked until the first completes.
+        for tech in [
+            TechId::HighExplosive,
+            TechId::CompositeArmor,
+            TechId::TargetingOptics,
+        ] {
+            assert!(tech_allowed(&g, Player::P0, tech));
         }
+        let cmd = Command::StartResearch {
+            player: Player::P0,
+            tech: TechId::HighExplosive,
+        };
+        assert!(g.validate_command(&cmd).is_ok(), "{cmd:?} must be legal");
+        g.apply_commands(Player::P0, &[cmd]);
+        assert!(!tech_allowed(&g, Player::P0, TechId::CompositeArmor));
     }
 }

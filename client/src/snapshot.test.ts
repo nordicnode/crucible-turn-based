@@ -6,14 +6,18 @@ function metaFixture(): ReplayMeta {
   const passable = new Array<boolean>(64 * 64).fill(true);
   const ore = new Array<number>(64 * 64).fill(0);
   ore[10 * 64 + 10] = 400;
+  const crystal = new Array<number>(64 * 64).fill(0);
+  crystal[20 * 64 + 20] = 150;
   return {
     map_seed: 7,
     passable,
+    terrain: [],
     hq_tiles: [
       [8, 8],
       [55, 55],
     ],
     ore,
+    crystal,
     duration_turns: 100,
     winner: null,
     win_reason: null,

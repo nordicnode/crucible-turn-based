@@ -38,6 +38,10 @@ export function friendlyBuildingCompleteMsg(btype: string): string {
       return "Radar array online";
     case "teslacoil":
       return "Tesla Coil charged";
+    case "crystalrefinery":
+      return "Crystal Refinery online";
+    case "aaturret":
+      return "AA Turret online";
     default:
       return `${btype} complete`;
   }
@@ -48,6 +52,10 @@ export function friendlyUnitReadyMsg(utype: string): string {
   switch (norm) {
     case "infantry":
       return "Infantry squad ready";
+    case "scout":
+      return "Scout buggy ready";
+    case "rockettrooper":
+      return "Rocket trooper squad ready";
     case "tank":
       return "Tank roll out";
     case "artillery":
@@ -58,8 +66,40 @@ export function friendlyUnitReadyMsg(utype: string): string {
       return "Interceptor scrambled";
     case "mammothtank":
       return "Mammoth Tank deployed";
+    case "samlauncher":
+      return "SAM launcher deployed";
     default:
       return `${utype} ready for orders`;
+  }
+}
+
+/** Humanize a tech name ("HighExplosive" or "highexplosive" →
+ *  "High-Explosive Payloads"). The server lowercases event kinds, so both
+ *  spellings arrive at the client. */
+export function humanizeTech(name: string): string {
+  switch (name.toLowerCase()) {
+    case "highexplosive":
+      return "High-Explosive Payloads";
+    case "compositearmor":
+      return "Composite Armor";
+    case "targetingoptics":
+      return "Targeting Optics";
+    case "efficientrefining":
+      return "Efficient Refining";
+    case "rocketpropulsion":
+      return "Rocket Propulsion";
+    case "titaniumalloys":
+      return "Titanium Alloys";
+    case "aerialsuperiority":
+      return "Aerial Superiority";
+    case "superconductors":
+      return "Superconductors";
+    case "crystalnanotech":
+      return "Crystal Nanotech";
+    case "advancedballistics":
+      return "Advanced Ballistics";
+    default:
+      return name;
   }
 }
 
@@ -130,17 +170,20 @@ export class IntelLogger {
       return this.addEntry(ev.turn, friendlyUnitReadyMsg(utype), "prod", "UNIT");
     }
 
-    // Upgrade chosen / researched
-    if (ev.kind.startsWith("upgrade")) {
-      let msg = "Upgrade research complete";
-      if (ev.kind === "upgrade:damage") {
-        msg = "Upgrade complete: High-Explosive (+25% Dmg)";
-      } else if (ev.kind === "upgrade:hp") {
-        msg = "Upgrade complete: Reinforced Armor (+25% HP)";
-      } else if (ev.kind === "upgrade:range") {
-        msg = "Upgrade complete: Extended Range (+1 Tile)";
-      }
-      return this.addEntry(ev.turn, msg, "prod", "TECH");
+    // Research started / completed
+    if (ev.kind.startsWith("research:")) {
+      const tech = humanizeTech(ev.kind.slice(9));
+      return this.addEntry(ev.turn, `Research started: ${tech}`, "prod", "TECH");
+    }
+    if (ev.kind.startsWith("researched:")) {
+      const tech = humanizeTech(ev.kind.slice(11));
+      return this.addEntry(ev.turn, `Research complete: ${tech}`, "prod", "TECH");
+    }
+
+    // Crystal income
+    if (ev.kind === "crystal_mined") {
+      const amt = ev.amount != null ? ` (+${ev.amount} crystal)` : "";
+      return this.addEntry(ev.turn, `Crystal refined${amt}`, "prod", "CRYSTAL");
     }
 
     // Structure sold / decommissioned
@@ -176,7 +219,7 @@ export class IntelLogger {
       text = "ALERT: Base HQ under attack!";
       level = "danger";
       tag = "ALERT";
-    } else if (["Refinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret"].includes(entity.kind)) {
+    } else if (["Refinery", "CrystalRefinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret"].includes(entity.kind)) {
       category = `building_${entity.kind}`;
       text = `ALERT: ${entity.kind} under fire!`;
       level = "danger";
@@ -210,12 +253,12 @@ export class IntelLogger {
       if (entity.kind === "Hq") {
         return this.addEntry(turn, "CRITICAL: Base HQ destroyed!", "danger", "LOST");
       }
-      if (["PowerPlant", "Refinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret"].includes(entity.kind)) {
+      if (["PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret"].includes(entity.kind)) {
         return this.addEntry(turn, `CRITICAL: ${entity.kind} destroyed!`, "danger", "LOST");
       }
       return this.addEntry(turn, `Unit lost: ${entity.kind}`, "danger", "LOST");
     } else {
-      if (["Hq", "PowerPlant", "Refinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret"].includes(entity.kind)) {
+      if (["Hq", "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret"].includes(entity.kind)) {
         return this.addEntry(turn, `Enemy ${entity.kind} destroyed!`, "kill", "KILL");
       }
       return this.addEntry(turn, `Hostile neutralized: ${entity.kind}`, "kill", "KILL");

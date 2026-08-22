@@ -24,5 +24,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

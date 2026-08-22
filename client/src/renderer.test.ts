@@ -20,6 +20,18 @@ describe("Camera", () => {
     expect(c.screenY(13.5)).toBeCloseTo(300, 5);
   });
 
+  it("can keep an edge HQ centered during initial match framing", () => {
+    const c = new Camera();
+    c.focusOn(55.5, 55.5, 18, 320, 1018, true);
+    c.setViewport(320, 1018);
+    expect(c.screenX(55.5)).toBeCloseTo(160, 5);
+    expect(c.screenY(55.5)).toBeCloseTo(509, 5);
+
+    // Manual navigation exits the temporary edge framing and clamps normally.
+    c.pan(0, 0);
+    expect(c.cy).toBeLessThanOrEqual(64 - 1018 / 18);
+  });
+
   it("keeps the view inside the map when zoomed in", () => {
     const c = new Camera();
     c.setViewport(800, 600);
@@ -120,20 +132,43 @@ describe("cameraViewRect", () => {
 });
 
 describe("isBuildingPlacable", () => {
-  it("allows placement on clear tile within range of base with enough ore", () => {
+  it("allows a refinery on a clear tile beside an ore field within range", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
+    world.ore = 500;
+    world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
+    world.oreTiles.set("13,10", { x: 13, y: 10, amount: 200 });
+
+    expect(isBuildingPlacable("Refinery", [12, 10], world)).toBe(true);
+  });
+
+  it("rejects a refinery not touching an ore field", () => {
+    const world = new World();
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
-    expect(isBuildingPlacable("Refinery", [12, 10], world)).toBe(true);
+    // No ore adjacent: the placement fails even though the tile is clear.
+    expect(isBuildingPlacable("Refinery", [12, 10], world)).toBe(false);
+  });
+
+  it("rejects a crystal refinery not touching a crystal field", () => {
+    const world = new World();
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
+    world.ore = 500;
+    world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
+
+    expect(isBuildingPlacable("CrystalRefinery", [12, 10], world)).toBe(false);
+
+    world.crystalTiles.set("12,11", { x: 12, y: 11, amount: 100 });
+    expect(isBuildingPlacable("CrystalRefinery", [12, 10], world)).toBe(true);
   });
 
   it("rejects placement on impassable tile", () => {
     const world = new World();
     const passable = new Array(64 * 64).fill(true);
     passable[10 * 64 + 12] = false;
-    world.setMap(1, passable, [[10, 10], [50, 50]]);
+    world.setMap(1, passable, [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -142,7 +177,7 @@ describe("isBuildingPlacable", () => {
 
   it("rejects placement on tile with existing building", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -151,7 +186,7 @@ describe("isBuildingPlacable", () => {
 
   it("rejects placement on tile with ore", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
     world.oreTiles.set("12,10", { x: 12, y: 10, amount: 200 });
@@ -161,17 +196,19 @@ describe("isBuildingPlacable", () => {
 
   it("rejects placement too far from own base", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
-    // Distance 10 tiles away (> 5 tiles limit)
-    expect(isBuildingPlacable("Refinery", [20, 10], world)).toBe(false);
+    // Distance 10 tiles away (> 5 tiles limit); refineries are exempt from
+    // the clump rule (remote pockets are the expansion mechanic), so the
+    // clump check is exercised with a PowerPlant.
+    expect(isBuildingPlacable("PowerPlant", [20, 10], world)).toBe(false);
   });
 
   it("rejects TechLab without Factory", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -184,7 +221,7 @@ describe("isBuildingPlacable", () => {
 
   it("rejects placement when player cannot afford building", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 50; // Refinery costs 300
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -193,7 +230,7 @@ describe("isBuildingPlacable", () => {
 
   it("validates PowerPlant placability and affordability", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 100; // PowerPlant costs 150
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -222,7 +259,7 @@ describe("isBuildingPlacable", () => {
 
   it("validates Airfield factory requirement and affordability", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.ore = 500;
     world.entities.set(1, { id: 1, kind: "Hq", owner: 0, x: 10, y: 10, hp: 1500, maxHp: 1500 });
 
@@ -239,7 +276,7 @@ describe("isBuildingPlacable", () => {
 
   it("draws a world with a building without error", () => {
     const world = new World();
-    world.setMap(1, new Array(64 * 64).fill(true), [[10, 10], [50, 50]]);
+    world.setMap(1, new Array(64 * 64).fill(true), [], [[10, 10], [50, 50]]);
     world.entities.set(1, {
       id: 1,
       kind: "Barracks",

@@ -5,12 +5,16 @@
 import { fx } from "./fx";
 import {
   drawBuildingSprite,
+  drawCrystalDeposit,
+  drawForestTile,
   drawHealthBar,
+  drawHillsTile,
   drawImpassableTile,
   drawOreDeposit,
   drawPassableTile,
   drawSelectionReticle,
   drawUnitSprite,
+  drawWaterTile,
 } from "./sprites";
 import { BUILDING_KINDS, BUILD_COSTS } from "./types";
 import type { Entity } from "./world";
@@ -26,6 +30,13 @@ export class Camera {
   zoom = 18; // Pixels per world tile
   viewportW = 800;
   viewportH = 600;
+  /**
+   * Initial match framing may need to show a HQ at the edge of the map even
+   * when HUD panels cover the lower part of the viewport. While set, keep the
+   * requested point centered and let the map end outside the canvas; the first
+   * manual pan/zoom returns to normal map clamping.
+   */
+  private centeredTarget: [number, number] | null = null;
 
   screenX(wx: number): number {
     return (wx - this.cx) * this.zoom;
@@ -43,6 +54,11 @@ export class Camera {
   setViewport(vw: number, vh: number): void {
     this.viewportW = vw;
     this.viewportH = vh;
+    if (this.centeredTarget) {
+      this.cx = this.centeredTarget[0] - vw / (2 * this.zoom);
+      this.cy = this.centeredTarget[1] - vh / (2 * this.zoom);
+      return;
+    }
     this.clampToMap();
   }
 
@@ -64,10 +80,18 @@ export class Camera {
     }
   }
 
-  focusOn(wx: number, wy: number, zoom: number, vw: number, vh: number): void {
+  focusOn(
+    wx: number,
+    wy: number,
+    zoom: number,
+    vw: number,
+    vh: number,
+    keepCentered = false,
+  ): void {
     this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
     this.viewportW = vw;
     this.viewportH = vh;
+    this.centeredTarget = keepCentered ? [wx, wy] : null;
     this.cx = wx - vw / (2 * this.zoom);
     this.cy = wy - vh / (2 * this.zoom);
   }
@@ -77,6 +101,7 @@ export class Camera {
   }
 
   pan(dx: number, dy: number, vw?: number, vh?: number): void {
+    this.centeredTarget = null;
     if (vw != null && vh != null) {
       this.viewportW = vw;
       this.viewportH = vh;
@@ -87,6 +112,7 @@ export class Camera {
   }
 
   zoomAt(sx: number, sy: number, factor: number, vw?: number, vh?: number): void {
+    this.centeredTarget = null;
     if (vw != null && vh != null) {
       this.viewportW = vw;
       this.viewportH = vh;
@@ -181,23 +207,47 @@ export class Renderer {
         const px = cam.screenX(tx);
         const py = cam.screenY(ty);
         const size = cam.zoom + 0.5;
+        const terrain = world.terrain.length > 0 ? world.terrain[idx] : undefined;
         const isPassable = world.passable[idx] ?? true;
 
-        if (isPassable) {
-          drawPassableTile(ctx, tx, ty, px, py, size, !isVis);
+        // Typed terrain (Plains/Forest/Hills/Water/Mountain): passability and
+        // the tile's look both come from the sim's terrain field, so what the
+        // player sees is what the engine moves and defends on.
+        if (!isVis) {
+          // Explored-but-not-visible: dark silhouette of the real terrain.
+          if (terrain === "Forest") drawForestTile(ctx, tx, ty, px, py, size, true);
+          else if (terrain === "Hills") drawHillsTile(ctx, tx, ty, px, py, size, true);
+          else if (terrain === "Water") drawWaterTile(ctx, tx, ty, px, py, size, true);
+          else if (isPassable) drawPassableTile(ctx, tx, ty, px, py, size, true);
+          else drawImpassableTile(ctx, tx, ty, px, py, size, true);
+        } else if (terrain === "Forest") {
+          drawForestTile(ctx, tx, ty, px, py, size, false);
+        } else if (terrain === "Hills") {
+          drawHillsTile(ctx, tx, ty, px, py, size, false);
+        } else if (terrain === "Water") {
+          drawWaterTile(ctx, tx, ty, px, py, size, false);
+        } else if (isPassable) {
+          drawPassableTile(ctx, tx, ty, px, py, size, false);
         } else {
-          drawImpassableTile(ctx, tx, ty, px, py, size, !isVis);
+          drawImpassableTile(ctx, tx, ty, px, py, size, false);
         }
       }
     }
 
-    // 3. Ore Fields
+    // 3. Ore Fields + Crystal Fields
     for (const t of world.oreTiles.values()) {
       const px = cam.screenX(t.x);
       const py = cam.screenY(t.y);
       const size = cam.zoom;
       if (px > w || py > h || px + size < 0 || py + size < 0) continue;
       drawOreDeposit(ctx, px, py, size, t.amount, animClock());
+    }
+    for (const t of world.crystalTiles.values()) {
+      const px = cam.screenX(t.x);
+      const py = cam.screenY(t.y);
+      const size = cam.zoom;
+      if (px > w || py > h || px + size < 0 || py + size < 0) continue;
+      drawCrystalDeposit(ctx, px, py, size, t.amount, animClock());
     }
 
     // 4. Ground Layer FX: Scorch craters, tracks, wreckage
@@ -261,6 +311,18 @@ export class Renderer {
     ctx.globalAlpha = alpha;
 
     const isSelected = e.owner === 0 && selection.has(e.id);
+
+    // Civ-style single-tile baseplate: a faint inset square marking the exact
+    // tile this entity occupies. Every entity owns exactly one tile.
+    ctx.strokeStyle = e.owner === 0 ? "rgba(143, 193, 181, 0.30)" : "rgba(201, 141, 106, 0.30)";
+    ctx.lineWidth = 1;
+    const pad = 4;
+    ctx.strokeRect(
+      Math.floor(px - z / 2) + pad,
+      Math.floor(py - z / 2) + pad,
+      z - 2 * pad,
+      z - 2 * pad,
+    );
 
     const heading = e.kind === "Turret" || e.kind === "TeslaCoil"
       ? this.turretHeading(world, e)
@@ -437,6 +499,12 @@ export class Renderer {
         ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
       }
     }
+    ctx.fillStyle = "#22d3ee";
+    for (const t of world.crystalTiles.values()) {
+      if (t.amount > 0) {
+        ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
+      }
+    }
 
     for (const e of world.entities.values()) {
       const isSel = selection.has(e.id);
@@ -499,9 +567,15 @@ export function drawRadar(
     }
   }
 
-  // 2. Ore fields
+  // 2. Ore fields + crystal fields
   ctx.fillStyle = COLORS.ore;
   for (const t of world.oreTiles.values()) {
+    if (t.amount > 0) {
+      ctx.fillRect(ox + t.x * s, oy + t.y * s, Math.max(2, s), Math.max(2, s));
+    }
+  }
+  ctx.fillStyle = "#22d3ee";
+  for (const t of world.crystalTiles.values()) {
     if (t.amount > 0) {
       ctx.fillRect(ox + t.x * s, oy + t.y * s, Math.max(2, s), Math.max(2, s));
     }
@@ -566,7 +640,17 @@ export function drawRadar(
 }
 
 function isUnit(e: Entity): boolean {
-  return ["Infantry", "Tank", "Artillery", "MammothTank", "Gunship", "Interceptor"].includes(e.kind);
+  return [
+    "Infantry",
+    "Scout",
+    "RocketTrooper",
+    "Tank",
+    "Artillery",
+    "MammothTank",
+    "Gunship",
+    "Interceptor",
+    "SamLauncher",
+  ].includes(e.kind);
 }
 
 export function isBuildingPlacable(
@@ -588,33 +672,50 @@ export function isBuildingPlacable(
     }
   }
 
-  // Check if tile has ore
+  // Check if tile has ore or crystal
   const ore = world.oreTiles.get(`${tx},${ty}`);
   if (ore && ore.amount > 0) return false;
+  const crystal = world.crystalTiles.get(`${tx},${ty}`);
+  if (crystal && crystal.amount > 0) return false;
 
-  // Check distance to nearest own building (within 5 tiles Euclidean)
-  const PLACE_RADIUS_SQ = 25; // 5^2
-  let nearOwn = false;
-  for (const b of world.ownBuildings) {
-    const bx = Math.floor(b.x);
-    const by = Math.floor(b.y);
-    const d2 = (bx - tx) * (bx - tx) + (by - ty) * (by - ty);
-    if (d2 <= PLACE_RADIUS_SQ) {
-      nearOwn = true;
-      break;
+  // Refineries must touch their resource field (they are exempt from the
+  // base-clump rule; remote pockets are the expansion mechanic).
+  if (btype === "Refinery" || btype === "CrystalRefinery") {
+    const fields = btype === "Refinery" ? world.oreTiles : world.crystalTiles;
+    let touches = false;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const f = fields.get(`${tx + dx},${ty + dy}`);
+      if (f && f.amount > 0) {
+        touches = true;
+        break;
+      }
+    }
+    if (!touches) return false;
+  } else {
+    // Check distance to nearest own building (within 5 tiles Euclidean)
+    const PLACE_RADIUS_SQ = 25; // 5^2
+    let nearOwn = false;
+    for (const b of world.ownBuildings) {
+      const bx = Math.floor(b.x);
+      const by = Math.floor(b.y);
+      const d2 = (bx - tx) * (bx - tx) + (by - ty) * (by - ty);
+      if (d2 <= PLACE_RADIUS_SQ) {
+        nearOwn = true;
+        break;
+      }
+    }
+    if (!nearOwn && world.ownBuildings.length > 0) {
+      return false;
     }
   }
-  if (!nearOwn && world.ownBuildings.length > 0) {
-    return false;
-  }
 
-  // Tech tree gates: TechLab & Airfield need a Factory; Radar & TeslaCoil
-  // are the second tier and need the TechLab itself.
+  // Tech tree gates: TechLab & Airfield need a Factory; Radar, TeslaCoil and
+  // the AATurret are the second tier and need the TechLab itself.
   if (btype === "TechLab" || btype === "Airfield") {
     const hasFactory = world.ownBuildings.some((b) => b.kind === "Factory");
     if (!hasFactory) return false;
   }
-  if (btype === "Radar" || btype === "TeslaCoil") {
+  if (btype === "Radar" || btype === "TeslaCoil" || btype === "AATurret") {
     const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
     if (!hasLab) return false;
   }

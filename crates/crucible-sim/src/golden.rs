@@ -25,9 +25,9 @@ pub const SEED: u64 = 12345;
 /// Re-recorded after the march fix: `MoveGroup` now retargets a blocked
 /// waypoint (e.g. the enemy HQ) to the nearest free adjacent tile, so the
 /// golden armies actually march out and fight (previously they never moved).
-pub const GOLDEN_10: u64 = 2176003729124827459;
-pub const GOLDEN_30: u64 = 2783978533185351442;
-pub const GOLDEN_60: u64 = 9070930935667238039;
+pub const GOLDEN_10: u64 = 6897779162281885343;
+pub const GOLDEN_30: u64 = 2164363162363943649;
+pub const GOLDEN_60: u64 = 3701182747275299226;
 
 pub fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -98,6 +98,25 @@ pub fn build_game(seed: u64) -> Game {
                 }],
             );
         }
+        // Exercise the new systems: claim the nearest crystal field and start
+        // the research tree (both deterministic search-based placements).
+        if let Some(ctile) = nearest_crystal_tile(&g, (hx, hy)) {
+            let _ = g.apply_commands(
+                p,
+                &[Command::PlaceBuilding {
+                    player: p,
+                    btype: BuildingType::CrystalRefinery,
+                    tile: adjacent_free(&g, ctile),
+                }],
+            );
+        }
+        let _ = g.apply_commands(
+            p,
+            &[Command::StartResearch {
+                player: p,
+                tech: crate::tech::TechId::HighExplosive,
+            }],
+        );
     }
 
     for p in Player::ALL {
@@ -142,6 +161,21 @@ pub fn build_game(seed: u64) -> Game {
     }
 
     g
+}
+
+fn nearest_crystal_tile(g: &Game, from: (u8, u8)) -> Option<(u8, u8)> {
+    let mut best: Option<(i32, (u8, u8))> = None;
+    for (idx, &amount) in g.map.crystal.iter().enumerate() {
+        if amount <= 0 {
+            continue;
+        }
+        let t = crate::map::tile_coords(idx);
+        let d = crate::tiles::chebyshev(from.0, from.1, t.0, t.1);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, t));
+        }
+    }
+    best.map(|(_, t)| t)
 }
 
 fn nearest_ore_tile(g: &Game, from: (u8, u8)) -> Option<(u8, u8)> {

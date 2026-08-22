@@ -91,8 +91,10 @@ pub fn replay_meta(replay_json: &str) -> Result<String, JsValue> {
     Ok(serde_json::json!({
         "map_seed": replay.map_seed,
         "passable": map.passable,
+        "terrain": map.terrain,
         "hq_tiles": map.hq_tiles,
         "ore": map.ore,
+        "crystal": map.crystal,
         "duration_turns": duration,
         "winner": replay.result.as_ref().and_then(|r| r.winner.map(|p| p.index() as u8)),
         "win_reason": replay.result.as_ref().and_then(|r| r.reason),

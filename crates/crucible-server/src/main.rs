@@ -4,6 +4,7 @@
 //! WebSocket live-match endpoint. The trainer and dashboard land in M4–M6.
 
 mod http;
+mod lifecycle;
 mod store;
 mod trainer;
 mod ws;
@@ -180,6 +181,19 @@ fn err(e: impl std::fmt::Display) -> (StatusCode, String) {
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
+    let addr: SocketAddr = std::env::var("CRUCIBLE_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8787".into())
+        .parse()
+        .expect("invalid CRUCIBLE_ADDR");
+
+    // `cargo run ... -- start` is the development-friendly entry point: it
+    // replaces an older local Crucible server before claiming the same port.
+    // Normal invocations stay conservative and fail loudly if another process
+    // owns the configured address.
+    if std::env::args().skip(1).any(|arg| arg == "start") {
+        lifecycle::replace_existing_server(addr);
+    }
+
     let db_path = std::env::var("CRUCIBLE_DB").unwrap_or_else(|_| "data/crucible.db".into());
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -223,19 +237,18 @@ async fn main() {
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
         .with_state(state);
 
-    let addr: SocketAddr = std::env::var("CRUCIBLE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8787".into())
-        .parse()
-        .expect("invalid CRUCIBLE_ADDR");
-
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");
     tracing::info!("listening on http://{addr}");
+    let pid_file = lifecycle::write_pid_file(addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+    if let Some(path) = pid_file {
+        lifecycle::remove_pid_file(&path);
+    }
 }
 
 /// Wait for Ctrl+C or SIGTERM so in-flight matches and the trainer's current

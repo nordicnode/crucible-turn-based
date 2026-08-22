@@ -39,8 +39,8 @@ cargo install wasm-bindgen-cli --version 0.2.127 --locked   # must match Cargo.l
 # 2. Build the client (includes the wasm replay shim)
 (cd client && npm run build)
 
-# 3. Run the server and play
-cargo run -p crucible-server
+# 3. Run the server and play (`start` replaces an older local server on 8787)
+cargo run -p crucible-server -- start
 # open http://127.0.0.1:8787
 ```
 
@@ -127,10 +127,10 @@ environment variables:
 
 ```bash
 # Bootstrap a competent champion from a cold start, then evolve 24/7:
-CRUCIBLE_TRAINER=1 CRUCIBLE_TRAINER_BOOTSTRAP=1 cargo run -p crucible-server
+CRUCIBLE_TRAINER=1 CRUCIBLE_TRAINER_BOOTSTRAP=1 cargo run -p crucible-server -- start
 
 # Or a quick, bounded run with a small population:
-CRUCIBLE_TRAINER=1 CRUCIBLE_TRAINER_SMALL=1 CRUCIBLE_TRAINER_GENERATIONS=5 cargo run -p crucible-server
+CRUCIBLE_TRAINER=1 CRUCIBLE_TRAINER_SMALL=1 CRUCIBLE_TRAINER_GENERATIONS=5 cargo run -p crucible-server -- start
 ```
 
 | Variable | Effect |
@@ -143,6 +143,11 @@ CRUCIBLE_TRAINER=1 CRUCIBLE_TRAINER_SMALL=1 CRUCIBLE_TRAINER_GENERATIONS=5 cargo
 
 Progress (population, champion, Elo, replays) is checkpointed in SQLite and
 resumes across restarts. Delete `data/crucible.db` for a fresh cold start.
+
+For local development, the `start` argument gracefully replaces an existing
+Crucible server launched from this checkout before binding the configured
+address. Use `cargo run -p crucible-server -- start` (or `cargo run start` from
+the server crate directory) instead of manually hunting down stale processes.
 
 Watch it learn at `http://127.0.0.1:8787/api/status` (generation, matches run)
 and `http://127.0.0.1:8787/api/champion` (current champion + Elo).

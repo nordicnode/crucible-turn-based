@@ -39,6 +39,7 @@ pub enum BuildingType {
     Hq,
     PowerPlant,
     Refinery,
+    CrystalRefinery,
     Barracks,
     Factory,
     TechLab,
@@ -46,24 +47,20 @@ pub enum BuildingType {
     Radar,
     TeslaCoil,
     Turret,
+    AATurret,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 pub enum UnitType {
     Infantry,
+    Scout,
+    RocketTrooper,
     Tank,
     Artillery,
     MammothTank,
     Gunship,
     Interceptor,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
-pub enum Upgrade {
-    None,
-    Damage,
-    Hp,
-    Range,
+    SamLauncher,
 }
 
 /// Unique entity id within a match.
@@ -89,6 +86,9 @@ pub struct UnitStats {
     /// Whether the unit flies: it ignores terrain passability and building
     /// blockers when moving.
     pub air: bool,
+    /// Anti-air capable: deals full damage to air targets. Ground units
+    /// without this deal only half damage to air units.
+    pub aa: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +117,34 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 4,
             build_time_turns: 1,
             air: false,
+            aa: false,
+        },
+        // Fast, fragile recon: a long stride and wide eyes, poor in a fight.
+        Scout => UnitStats {
+            cost: 40,
+            hp: 60,
+            damage: 30,
+            range_tiles: 1,
+            min_range_tiles: 0,
+            mp: 6,
+            vision_tiles: 6,
+            build_time_turns: 1,
+            air: false,
+            aa: false,
+        },
+        // Anti-armor/anti-air infantry: a shoulder-mounted rocket launcher.
+        // Rockets trade the rifleman's cheapness for a hard punch vs vehicles.
+        RocketTrooper => UnitStats {
+            cost: 120,
+            hp: 90,
+            damage: 85,
+            range_tiles: 2,
+            min_range_tiles: 0,
+            mp: 3,
+            vision_tiles: 4,
+            build_time_turns: 2,
+            air: false,
+            aa: true,
         },
         Tank => UnitStats {
             cost: 150,
@@ -128,6 +156,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 5,
             build_time_turns: 2,
             air: false,
+            aa: false,
         },
         // Long-range siege: cannot fire point blank (min range 2), fragile,
         // slow — but outranges every turret and hits from behind the line.
@@ -141,6 +170,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 6,
             build_time_turns: 2,
             air: false,
+            aa: false,
         },
         MammothTank => UnitStats {
             cost: 350,
@@ -152,6 +182,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 5,
             build_time_turns: 3,
             air: false,
+            aa: true,
         },
         // Fast strike aircraft (airfield-built). Fragile but mobile: flies over
         // everything, strikes from range 2 where melee units cannot retaliate.
@@ -165,6 +196,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 5,
             build_time_turns: 2,
             air: true,
+            aa: false,
         },
         Interceptor => UnitStats {
             cost: 200,
@@ -176,6 +208,22 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
             vision_tiles: 6,
             build_time_turns: 2,
             air: true,
+            aa: false,
+        },
+        // Ground-based surface-to-air missile launcher: brutal vs aircraft,
+        // fragile and short-ranged against ground targets (low damage, small
+        // hp, slow). The dedicated answer to a gunship/interceptor fleet.
+        SamLauncher => UnitStats {
+            cost: 180,
+            hp: 110,
+            damage: 75,
+            range_tiles: 4,
+            min_range_tiles: 1,
+            mp: 2,
+            vision_tiles: 5,
+            build_time_turns: 2,
+            air: false,
+            aa: true,
         },
     }
 }
@@ -206,6 +254,16 @@ pub const fn building_stats(bt: BuildingType) -> BuildingStats {
             damage: 0,
             range_tiles: 0,
             power: -20,
+        },
+        // Drains adjacent crystal fields, like a Refinery drains ore. Placed
+        // adjacent to a crystal tile (see `Game::validate_place`).
+        CrystalRefinery => BuildingStats {
+            cost: 350,
+            hp: 400,
+            vision_tiles: 3,
+            damage: 0,
+            range_tiles: 0,
+            power: -25,
         },
         Barracks => BuildingStats {
             cost: 150,
@@ -267,6 +325,15 @@ pub const fn building_stats(bt: BuildingType) -> BuildingStats {
             range_tiles: 3,
             power: -20,
         },
+        // Anti-air defense: only engages air units, but hits them hard.
+        AATurret => BuildingStats {
+            cost: 200,
+            hp: 200,
+            vision_tiles: 5,
+            damage: 45,
+            range_tiles: 4,
+            power: -25,
+        },
     }
 }
 
@@ -276,16 +343,32 @@ pub const HQ_INCOME_PER_TURN: i32 = 10;
 /// adjacent ore tiles (lowest tile-index first). A refinery whose adjacent
 /// fields are depleted earns nothing.
 pub const REFINERY_ORE_PER_TURN: i32 = 60;
+/// Each crystal refinery drains up to this much crystal per turn from
+/// adjacent crystal tiles.
+pub const CRYSTAL_REFINERY_PER_TURN: i32 = 25;
+/// Each Tech Lab generates this many research points per own turn. Paced so
+/// a tier-1 tech (150 pts) lands in ~6 turns — close to the old instant
+/// upgrade — while the full 10-tech tree stays a late-game project.
+pub const RESEARCH_PER_LAB_PER_TURN: i32 = 25;
 
 /// Which units a building can train.
 pub fn building_produces(bt: BuildingType) -> &'static [UnitType] {
     use BuildingType::*;
     use UnitType::*;
     match bt {
-        Barracks => &[Infantry],
-        Factory => &[Tank, Artillery, MammothTank],
+        Barracks => &[Infantry, Scout, RocketTrooper],
+        Factory => &[Tank, Artillery, MammothTank, SamLauncher],
         Airfield => &[Gunship, Interceptor],
         _ => &[],
+    }
+}
+
+/// The tech that gates a unit's production, if any.
+pub fn unit_requires_tech(ut: UnitType) -> Option<crate::tech::TechId> {
+    use crate::tech::TechId;
+    match ut {
+        UnitType::RocketTrooper | UnitType::SamLauncher => Some(TechId::RocketPropulsion),
+        _ => None,
     }
 }
 

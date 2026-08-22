@@ -17,8 +17,8 @@
 //! state as it will be when its turn comes.
 
 use crucible_sim::{
-    building_stats, tiles::chebyshev, unit_stats, Building, BuildingType, Command, EntityId, Game,
-    Player, UnitType, Upgrade,
+    building_stats, tech::prereqs_met, tech::tech_info, tech::TechId, tiles::chebyshev, unit_stats,
+    Building, BuildingType, Command, EntityId, Game, Player, UnitType,
 };
 
 use crate::bot::Bot;
@@ -115,16 +115,24 @@ pub(crate) fn find_build_tile(
 ) -> Option<(u8, u8)> {
     let free = |t: (u8, u8)| !plan.used_tiles.contains(&t) && is_valid_build_tile(g, p, bt, t);
 
-    if bt == BuildingType::Refinery {
-        let mut ores: Vec<(usize, (u8, u8))> = (0..crucible_sim::map::MAP_TILES)
-            .filter(|&i| g.map.ore[i] > 0)
+    if bt == BuildingType::Refinery || bt == BuildingType::CrystalRefinery {
+        // Refineries must touch their resource field: walk every ore (or
+        // crystal) tile nearest to `preferred` first and try its free
+        // 8-dir neighbors. Remote pockets are the expansion mechanic.
+        let fields = if bt == BuildingType::Refinery {
+            &g.map.ore
+        } else {
+            &g.map.crystal
+        };
+        let mut fields: Vec<(usize, (u8, u8))> = (0..crucible_sim::map::MAP_TILES)
+            .filter(|&i| fields[i] > 0)
             .map(|i| (i, crucible_sim::map::tile_coords(i)))
             .collect();
-        ores.sort_by_key(|&(idx, t)| (chebyshev(t.0, t.1, preferred.0, preferred.1), idx));
-        for (_, ore_tile) in ores {
+        fields.sort_by_key(|&(idx, t)| (chebyshev(t.0, t.1, preferred.0, preferred.1), idx));
+        for (_, field_tile) in fields {
             for &(dx, dy) in crucible_sim::orders::NEIGHBOR_OFFSETS.iter() {
-                let x = ore_tile.0 as i32 + dx;
-                let y = ore_tile.1 as i32 + dy;
+                let x = field_tile.0 as i32 + dx;
+                let y = field_tile.1 as i32 + dy;
                 if !(0..64).contains(&x) || !(0..64).contains(&y) {
                     continue;
                 }
@@ -211,6 +219,13 @@ fn train_up_to(
             .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_alive())
     {
         return None;
+    }
+    // Research-gated units stay masked until the tech is researched,
+    // mirroring the sim's validator exactly.
+    if let Some(tech) = crucible_sim::entity::unit_requires_tech(ut) {
+        if !g.research[p.index()].has(tech) {
+            return None;
+        }
     }
     let queued: usize = g
         .buildings
@@ -315,17 +330,40 @@ pub(crate) fn army_orders(g: &Game, p: Player, objective: (u8, u8)) -> Vec<Comma
     cmds
 }
 
-/// Choose the damage upgrade once a Tech Lab exists.
-fn choose_damage_upgrade(g: &Game, p: Player) -> Option<Command> {
-    if g.upgrades[p.index()] != Upgrade::None {
+/// The next technology to research, if a Tech Lab exists and research is
+/// idle. Picks the highest-priority tech whose prereqs are met and whose
+/// crystal cost is affordable (crystal is deducted at completion).
+/// Deterministic priority: army power first, then the rocket unlocks, then
+/// economy, then the deep tech.
+fn research_next(g: &Game, p: Player) -> Option<Command> {
+    use TechId::*;
+    let _lab = own_building(g, p, BuildingType::TechLab)?;
+    let r = &g.research[p.index()];
+    if r.researching.is_some() {
         return None;
     }
-    let lab = own_building(g, p, BuildingType::TechLab)?;
-    Some(Command::ChooseUpgrade {
-        player: p,
-        lab: lab.id,
-        upgrade: Upgrade::Damage,
-    })
+    const PRIORITY: [TechId; 10] = [
+        HighExplosive,
+        CompositeArmor,
+        TargetingOptics,
+        RocketPropulsion,
+        EfficientRefining,
+        TitaniumAlloys,
+        AdvancedBallistics,
+        Superconductors,
+        AerialSuperiority,
+        CrystalNanotech,
+    ];
+    for t in PRIORITY {
+        if r.has(t) || !prereqs_met(t, &r.researched) {
+            continue;
+        }
+        if tech_info(t).crystal_cost > g.crystal[p.index()] {
+            continue;
+        }
+        return Some(Command::StartResearch { player: p, tech: t });
+    }
+    None
 }
 
 fn enemy_hq_tile(g: &Game, p: Player) -> (u8, u8) {
@@ -532,6 +570,8 @@ impl Bot for MediumBot {
         // Late-game siege: a TechLab once the first wave is on the march, so
         // wave two brings artillery (range 3, 110 dmg) that out-trades the
         // turtle's turrets (12 dmg) and cracks a base infantry alone cannot.
+        // The lab also starts the research tree; the rocket troopers it
+        // unlocks reinforce later waves.
         if g.turn > 30 {
             if let Some(c) = place_if_missing(
                 g,
@@ -544,6 +584,9 @@ impl Bot for MediumBot {
                 out.push(c);
             }
         }
+        // The medium never researches: its identity is cheap continuous
+        // pressure, and the wave needs every ore point as a body, not a tech.
+        // (Hard is the tech pusher and owns the research tree.)
 
         // The wave: infantry bodies (cheap, 1-turn build) as the hammer,
         // tanks as the anvil once the infantry train is running.
@@ -670,13 +713,25 @@ impl Bot for HardBot {
             out.push(c);
         }
 
-        // Early army: 8 infantry + 6 tanks.
+        // Early army: 8 infantry + 6 tanks. Once Rocket Propulsion lands,
+        // a couple of rocket troopers (tech-gated in `train_up_to`) join the
+        // barracks queue — they out-trade armor without diluting it.
         if let Some(c) = train_up_to(
             g,
             p,
             BuildingType::Barracks,
             UnitType::Infantry,
             8,
+            &mut plan,
+        ) {
+            out.push(c);
+        }
+        if let Some(c) = train_up_to(
+            g,
+            p,
+            BuildingType::Barracks,
+            UnitType::RocketTrooper,
+            2,
             &mut plan,
         ) {
             out.push(c);
@@ -697,7 +752,9 @@ impl Bot for HardBot {
             }
         }
 
-        // Tech Lab & Damage Upgrade (+25% attack power for all units).
+        // Tech Lab & the research tree (damage first, then the rocket
+        // unlocks). `research_next` fires every turn research is idle, so the
+        // lab keeps working through the whole tree.
         if let Some(c) = place_if_missing(
             g,
             p,
@@ -708,7 +765,9 @@ impl Bot for HardBot {
         ) {
             out.push(c);
         }
-        if let Some(c) = choose_damage_upgrade(g, p) {
+        // Hard is the tech pusher: research runs from the moment the lab is
+        // up, powering the whole tree by the late game.
+        if let Some(c) = research_next(g, p) {
             out.push(c);
         }
 

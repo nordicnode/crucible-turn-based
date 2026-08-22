@@ -15,21 +15,22 @@ import {
   BUILDING_KINDS,
   BUILDING_POWER,
   BUILD_COSTS,
+  TECH_INFO,
   UNIT_COSTS,
   UNIT_KINDS,
   attack,
-  chooseUpgrade,
   endTurn,
   moveGroup,
   placeBuilding,
   repair,
   sell,
+  startResearch,
   trainUnit,
   type BuildingType,
   type Command,
   type ServerMsg,
+  type TechId,
   type UnitType,
-  type Upgrade,
 } from "./types";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
@@ -66,8 +67,6 @@ let demoTime = 0;
 let inGame = false;
 let selection = new Set<number>();
 let placementMode: BuildingType | null = null;
-/** The player's currently researched upgrade ("None" until one is chosen). */
-let myUpgrade: Upgrade = "None";
 let placementCursor: [number, number] | null = null;
 let opponentLabel = "hard";
 
@@ -107,9 +106,18 @@ function onServerMsg(msg: ServerMsg): void {
   switch (msg.type) {
     case "matchStart": {
       inGame = true;
-      world.setMap(msg.mapSeed, msg.passable, msg.hq);
+      world.setMap(msg.mapSeed, msg.passable, msg.terrain ?? [], msg.hq);
       const ownHq = msg.hq[msg.player];
-      renderer.camera.focusOn(ownHq[0] + 0.5, ownHq[1] + 0.5, 18, canvas.width, canvas.height);
+      // Keep the player's HQ centered even when it spawns against a map edge;
+      // the bottom command tray must never hide the opening position.
+      renderer.camera.focusOn(
+        ownHq[0] + 0.5,
+        ownHq[1] + 0.5,
+        18,
+        canvas.width,
+        canvas.height,
+        true,
+      );
       el("overlay").classList.add("hidden");
       el("lobby").classList.add("hidden");
       el("result").classList.add("hidden");
@@ -117,11 +125,12 @@ function onServerMsg(msg: ServerMsg): void {
       el("spectate-list").classList.add("hidden");
       el("sidebar").classList.remove("hidden");
       el("topbar").classList.remove("hidden");
+      el("turn-ribbon").classList.remove("hidden");
+      el("radar-block").classList.remove("hidden");
       el("log").classList.remove("hidden");
       el("opponent").textContent = opponentLabel.toUpperCase();
       unitWaypoints.clear();
       prevEntityHp.clear();
-      myUpgrade = "None";
       incomeWindow = [];
       intel.clear();
       intel.addEntry(0, "Tactical link active. Operation underway.", "info", "LINK");
@@ -170,16 +179,17 @@ function onServerMsg(msg: ServerMsg): void {
         msg.turn,
         msg.activePlayer,
         msg.ore,
+        msg.crystal ?? 0,
+        msg.research ?? { points: 0, researching: null, researched: [] },
         msg.entities,
         msg.oreTiles,
+        msg.crystalTiles ?? [],
         msg.visible,
         msg.events,
         // Use the server's authoritative power numbers (the client's static
         // table is only a fallback for menus/spectate).
         { produced: msg.powerProduced ?? 0, consumed: msg.powerConsumed ?? 0 },
       );
-      // Server-authoritative research state (drives the lab's command card).
-      if (msg.upgrade) myUpgrade = msg.upgrade;
 
       for (const ev of msg.events) {
         // Passive refinery income arrives as `ore_mined` events; track a
@@ -250,6 +260,8 @@ function showLobby(): void {
   el("result").classList.add("hidden");
   el("sidebar").classList.add("hidden");
   el("topbar").classList.add("hidden");
+  el("turn-ribbon").classList.add("hidden");
+  el("radar-block").classList.add("hidden");
   el("log").classList.add("hidden");
   el("lobby-status").textContent = "";
 }
@@ -260,10 +272,30 @@ function showLobby(): void {
 
 function renderTurnIndicator(): void {
   el("turn").textContent = String(world.turn);
+  const ribbon = el("turn-ribbon");
+  ribbon.classList.remove("hidden");
+  const state = el("turn-state");
   const endBtn = el<HTMLButtonElement>("action-end-turn");
-  const isMine = world.activePlayer === 0;
+  // Topbar readouts: crystal stock and the research button's availability.
+  el("crystal").textContent = String(world.crystal);
+  const researchBtn = el<HTMLButtonElement>("research-open");
+  if (researchBtn) {
+    const hasLab = inGame && world.ownBuildings.some((b) => b.kind === "TechLab");
+    researchBtn.disabled = !hasLab;
+    if (researchOpen) renderResearch();
+  }
+  const isMine = inGame && world.activePlayer === 0;
+  if (isMine) {
+    ribbon.classList.add("your-turn");
+    ribbon.classList.remove("their-turn");
+    state.textContent = "— YOUR MOVE";
+  } else {
+    ribbon.classList.remove("your-turn");
+    ribbon.classList.add("their-turn");
+    state.textContent = "— OPPONENT TURN";
+  }
   endBtn.disabled = !inGame || !isMine;
-  endBtn.textContent = isMine ? "END TURN" : "OPPONENT TURN…";
+  endBtn.textContent = "END TURN";
   if (isMine) {
     endBtn.classList.add("armed");
   } else {
@@ -548,9 +580,16 @@ window.addEventListener("keydown", (ev) => {
     toolMode = null;
     lastPanelSig = "";
     renderCommandSidebar();
+    if (researchOpen) closeResearch();
     return;
   }
   if (!inGame) return;
+  // R opens the research tree (Civ-style keyboard-first flow).
+  if (ev.key === "r" || ev.key === "R") {
+    if (researchOpen) closeResearch();
+    else openResearch();
+    return;
+  }
 
   const groupIdx = /^[1-9]$/.exec(ev.key) ? Number(ev.key) : null;
   if (groupIdx !== null) {
@@ -623,6 +662,19 @@ function initToolAndTabIcons(): void {
       renderTurnIndicator();
     }
   });
+
+  // Research button: opens the tech tree (also bound to R).
+  const researchOpenBtn = el("research-open");
+  if (researchOpenBtn) {
+    researchOpenBtn.addEventListener("click", () => {
+      if (researchOpen) closeResearch();
+      else openResearch();
+    });
+  }
+  const researchCloseBtn = el("research-close");
+  if (researchCloseBtn) {
+    researchCloseBtn.addEventListener("click", closeResearch);
+  }
 
   // Tab button click listeners
   for (const tabName of ["buildings", "troops", "vehicles", "aircraft"] as CommandTab[]) {
@@ -782,6 +834,7 @@ function cmdButton(
     disabledReason?: string;
     power?: { produces: number; consumes: number };
     label?: string;
+    badge?: string;
   } = {},
 ): HTMLButtonElement {
   const thumbUrl = getThumbnailDataUrl(key, 0);
@@ -818,6 +871,12 @@ function cmdButton(
     }
   }
   if (opts.armed) b.classList.add("armed");
+  if (opts.badge) {
+    const tag = document.createElement("span");
+    tag.className = "cmd-badge";
+    tag.textContent = opts.badge;
+    b.appendChild(tag);
+  }
   if (!b.classList.contains("disabled")) b.addEventListener("click", onClick);
   return b;
 }
@@ -848,7 +907,7 @@ function renderCommandSidebar(): void {
     "|" +
     bCounts +
     "|" +
-    myUpgrade +
+    world.research.researched.length +
     "|" +
     world.activePlayer;
   if (sig === lastPanelSig) return;
@@ -927,36 +986,40 @@ function renderCommandSidebar(): void {
   grid.innerHTML = "";
   empty.classList.add("hidden");
 
-  // Contextual upgrades if TechLab is selected. Once one research is chosen
-  // the others lock, and the active one stays highlighted (server-authoritative
-  // `myUpgrade` keeps this true even after reselecting the lab).
+  // Tech Lab selected: a RESEARCH button opens the tech overlay (Civ-style
+  // tree, not a one-shot card). The ribbon shows live progress.
   if (selEntity && selEntity.kind === "TechLab" && selEntity.owner === 0) {
-    for (const up of ["Damage", "Hp", "Range"] as Upgrade[]) {
-      const isActive = myUpgrade === up;
-      const isLocked = myUpgrade !== "None" && !isActive;
-      grid.appendChild(
-        cmdButton(up, 0, () => sendCommands([chooseUpgrade(single!, up)]), {
-          armed: isActive,
-          disabled: isActive || isLocked,
-          disabledReason: isActive
-            ? "ACTIVE RESEARCH"
-            : isLocked
-              ? "ONE RESEARCH ONLY"
-              : undefined,
-        }),
-      );
-    }
+    const r = world.research;
+    const researching = r.researching ? TECH_INFO[r.researching] : null;
+    grid.appendChild(
+      cmdButton(
+        "Research",
+        0,
+        () => openResearch(),
+        {
+          armed: false,
+          badge: researching
+            ? `${researching.name} · ${r.points}/${researching.researchCost} pts`
+            : r.researched.length > 0
+              ? `${r.researched.length} TECH`
+              : "OPEN TREE",
+        },
+      ),
+    );
   }
 
   if (activeTab === "buildings") {
     const hasFactory = world.ownBuildings.some((b) => b.kind === "Factory");
     const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
-    const buildings: BuildingType[] = ["PowerPlant", "Refinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret"];
+    const buildings: BuildingType[] = [
+      "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory",
+      "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret",
+    ];
     for (const b of buildings) {
-      // Tech tree: TechLab & Airfield need a Factory; Radar & TeslaCoil are
-      // the second tier and need the TechLab itself.
+      // Tech tree: TechLab & Airfield need a Factory; Radar, TeslaCoil and
+      // the AATurret are the second tier and need the TechLab itself.
       const needsFactory = b === "TechLab" || b === "Airfield";
-      const needsLab = b === "Radar" || b === "TeslaCoil";
+      const needsLab = b === "Radar" || b === "TeslaCoil" || b === "AATurret";
       const isLocked = (needsFactory && !hasFactory) || (needsLab && !hasLab);
       const reason = needsLab && !hasLab ? "REQUIRES TECH LAB" : needsFactory && !hasFactory ? "REQUIRES FACTORY" : undefined;
       grid.appendChild(
@@ -980,35 +1043,50 @@ function renderCommandSidebar(): void {
     }
   } else if (activeTab === "troops") {
     const barracks = world.ownBuildings.find((b) => b.kind === "Barracks");
-    grid.appendChild(
-      cmdButton(
-        "Infantry",
-        UNIT_COSTS["Infantry"],
-        () => {
-          if (barracks) {
-            sendCommands([trainUnit(barracks.id, "Infantry")]);
-          }
-        },
-        {
-          disabled: !barracks,
-          disabledReason: barracks ? undefined : "REQUIRES BARRACKS",
-        },
-      ),
-    );
+    const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
+    const troops: UnitType[] = ["Infantry", "Scout", "RocketTrooper"];
+    for (const t of troops) {
+      const needsTech = t === "RocketTrooper" && !hasRockets;
+      const isLocked = !barracks || needsTech;
+      const reason = needsTech ? "RESEARCH ROCKET PROPULSION" : !barracks ? "REQUIRES BARRACKS" : undefined;
+      grid.appendChild(
+        cmdButton(
+          t,
+          UNIT_COSTS[t],
+          () => {
+            if (barracks && !needsTech) {
+              sendCommands([trainUnit(barracks.id, t)]);
+            }
+          },
+          {
+            disabled: isLocked,
+            disabledReason: reason,
+          },
+        ),
+      );
+    }
   } else if (activeTab === "vehicles") {
     const factory = world.ownBuildings.find((b) => b.kind === "Factory");
     const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
-    const vehicles: UnitType[] = ["Tank", "Artillery", "MammothTank"];
+    const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
+    const vehicles: UnitType[] = ["Tank", "Artillery", "MammothTank", "SamLauncher"];
     for (const v of vehicles) {
       const needsLab = v === "Artillery" || v === "MammothTank";
-      const isLocked = !factory || (needsLab && !hasLab);
-      const reason = !factory ? "REQUIRES FACTORY" : needsLab && !hasLab ? "REQUIRES TECH LAB" : undefined;
+      const needsTech = v === "SamLauncher" && !hasRockets;
+      const isLocked = !factory || (needsLab && !hasLab) || needsTech;
+      const reason = needsTech
+        ? "RESEARCH ROCKET PROPULSION"
+        : !factory
+          ? "REQUIRES FACTORY"
+          : needsLab && !hasLab
+            ? "REQUIRES TECH LAB"
+            : undefined;
       grid.appendChild(
         cmdButton(
           v,
           UNIT_COSTS[v],
           () => {
-            if (factory && (!needsLab || hasLab)) {
+            if (factory && (!needsLab || hasLab) && !needsTech) {
               sendCommands([trainUnit(factory.id, v)]);
             }
           },
@@ -1040,6 +1118,110 @@ function renderCommandSidebar(): void {
       );
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Research overlay (Civ-style tech tree)
+// ---------------------------------------------------------------------------
+
+/** Whether the research overlay is open. */
+let researchOpen = false;
+
+function openResearch(): void {
+  if (!inGame) return;
+  researchOpen = true;
+  renderResearch();
+  el("research-overlay").classList.remove("hidden");
+}
+
+function closeResearch(): void {
+  researchOpen = false;
+  el("research-overlay").classList.add("hidden");
+}
+
+/** The research tree ordering, tier by tier (mirrors tech.rs). */
+const TECH_ORDER: TechId[] = [
+  "HighExplosive", "CompositeArmor", "TargetingOptics", "EfficientRefining",
+  "RocketPropulsion", "TitaniumAlloys", "AerialSuperiority", "Superconductors",
+  "CrystalNanotech", "AdvancedBallistics",
+];
+
+/** Tier index per tech: tier = depth of the deepest prereq chain. */
+function techTier(id: TechId): number {
+  const info = TECH_INFO[id];
+  if (info.prereqs.length === 0) return 0;
+  return 1 + Math.max(...info.prereqs.map((p) => techTier(p)));
+}
+
+function renderResearch(): void {
+  const r = world.research;
+  const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
+  const canStart =
+    hasLab && r.researching == null && world.activePlayer === 0 && !world.result;
+
+  el("research-points").textContent = `${r.points} pts`;
+  el("research-crystal").textContent = `${world.crystal} crystal`;
+
+  const tree = el("research-tree");
+  tree.innerHTML = "";
+  const tiers = new Map<number, TechId[]>();
+  for (const id of TECH_ORDER) {
+    const t = techTier(id);
+    if (!tiers.has(t)) tiers.set(t, []);
+    tiers.get(t)!.push(id);
+  }
+  const tierKeys = [...tiers.keys()].sort((a, b) => a - b);
+  for (const tier of tierKeys) {
+    const row = document.createElement("div");
+    row.className = "research-row";
+    row.dataset.tier = String(tier);
+    for (const id of tiers.get(tier)!) {
+      row.appendChild(researchCard(id, canStart));
+    }
+    tree.appendChild(row);
+  }
+}
+
+function researchCard(id: TechId, canStart: boolean): HTMLElement {
+  const info = TECH_INFO[id];
+  const r = world.research;
+  const done = r.researched.includes(id);
+  const active = r.researching === id;
+  const prereqsMet = info.prereqs.every((p) => r.researched.includes(p));
+  const crystalOk = world.crystal >= info.crystalCost;
+  const locked = !prereqsMet || (info.crystalCost > 0 && !crystalOk);
+  const disabled = done || active || !canStart || locked;
+
+  const card = document.createElement("button");
+  card.className = "research-card" + (done ? " done" : "") + (active ? " active" : "");
+  card.type = "button";
+  card.innerHTML = `
+    <div class="research-name">${info.name}</div>
+    <div class="research-desc">${info.description}</div>
+    <div class="research-cost">
+      ${info.researchCost} pts${info.crystalCost > 0 ? ` · ${info.crystalCost} crystal` : ""}
+      ${active ? ` · ${Math.min(100, Math.round((r.points / info.researchCost) * 100))}%` : ""}
+    </div>
+  `;
+  if (active) card.classList.add("progress");
+  if (disabled) {
+    card.disabled = true;
+    if (locked && !done && !active) {
+      const why = !prereqsMet ? "PREREQS NOT MET" : "NEEDS CRYSTAL";
+      const note = document.createElement("div");
+      note.className = "research-lock";
+      note.textContent = why;
+      card.appendChild(note);
+    }
+  }
+  card.addEventListener("click", () => {
+    if (!disabled) {
+      sendCommands([startResearch(id)]);
+      closeResearch();
+      renderCommandSidebar();
+    }
+  });
+  return card;
 }
 
 let lastRenderedLogCount = -1;
@@ -1084,17 +1266,26 @@ function formatTurns(turns: number): string {
 // ---------------------------------------------------------------------------
 
 function resize(): void {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  // Fall back to layout metrics (and a sane floor) so a viewport that starts
+  // hidden/zero-sized never freezes the canvas at 0×0.
+  const w = window.innerWidth || document.documentElement.clientWidth || 800;
+  const h = window.innerHeight || document.documentElement.clientHeight || 600;
+  canvas.width = w;
+  canvas.height = h;
   renderer.camera.setViewport(canvas.width, canvas.height);
   menuRenderer.camera.setViewport(canvas.width, canvas.height);
-  spectate.renderer.camera.setViewport(window.innerWidth, window.innerHeight);
+  spectate.renderer.camera.setViewport(w, h);
 }
 window.addEventListener("resize", resize);
+// Re-size once the tab becomes visible again (a browser may launch the page
+// hidden, then expand it without firing another `resize`).
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resize();
+});
 resize();
 
 function initMenuBattle(): void {
-  menuWorld.setMap(42, new Array(64 * 64).fill(true), [[10, 10], [54, 54]]);
+  menuWorld.setMap(42, new Array(64 * 64).fill(true), [], [[10, 10], [54, 54]]);
   menuWorld.oreTiles.set("18,18", { x: 18, y: 18, amount: 600 });
   menuWorld.oreTiles.set("46,46", { x: 46, y: 46, amount: 600 });
   menuWorld.oreTiles.set("32,32", { x: 32, y: 32, amount: 800 });
@@ -1179,8 +1370,11 @@ function updateMenuBattle(dtSec: number): void {
     menuWorld.turn + 1,
     0,
     500,
+    0,
+    { points: 0, researching: null, researched: [] },
     entities,
     [{ x: 18, y: 18, amount: 600 }, { x: 46, y: 46, amount: 600 }, { x: 32, y: 32, amount: 800 }],
+    [],
     Array.from({ length: 64 * 64 }, (_, i) => i),
     [],
   );

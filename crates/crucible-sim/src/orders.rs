@@ -11,10 +11,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::entity::{
-    building_produces, building_stats, unit_stats, BuildingType, EntityId, Player, UnitType,
-    Upgrade, PLACE_RADIUS_TILES,
+    building_produces, building_stats, unit_requires_tech, unit_stats, BuildingType, EntityId,
+    Player, UnitType, PLACE_RADIUS_TILES,
 };
 use crate::game::Game;
+use crate::tech::{prereqs_met, TechId};
 use crate::tiles::within_range;
 
 /// A player command. Serialized as a tagged enum for the wire/replay format.
@@ -45,10 +46,11 @@ pub enum Command {
         units: Vec<EntityId>,
         target: EntityId,
     },
-    ChooseUpgrade {
+    /// Start researching `tech` (requires an owned, alive Tech Lab). The tech
+    /// completes automatically once the research pool covers its cost.
+    StartResearch {
         player: Player,
-        lab: EntityId,
-        upgrade: Upgrade,
+        tech: TechId,
     },
     Sell {
         player: Player,
@@ -72,7 +74,7 @@ impl Command {
             | Command::TrainUnit { player, .. }
             | Command::MoveGroup { player, .. }
             | Command::Attack { player, .. }
-            | Command::ChooseUpgrade { player, .. }
+            | Command::StartResearch { player, .. }
             | Command::Sell { player, .. }
             | Command::Repair { player, .. }
             | Command::EndTurn { player } => *player,
@@ -95,8 +97,13 @@ pub enum CommandError {
     RequiresFactory,
     RequiresTechLab,
     RequiresOreAdjacent,
+    RequiresCrystalAdjacent,
     TileBlocked,
     TileHasOre,
+    RequiresTech,
+    TechPrereqNotMet,
+    TechAlreadyResearched,
+    AlreadyResearching,
     InvalidTile,
     TooFarFromBase,
     NotEnoughOre,
@@ -108,7 +115,6 @@ pub enum CommandError {
     AlreadyRepaired,
     BuildingFullHealth,
     CantSellHq,
-    UpgradeAlreadyChosen,
     NotYourTurn,
     MatchOver,
     RateLimited,
@@ -124,8 +130,15 @@ impl std::fmt::Display for CommandError {
             CommandError::RequiresFactory => "requires a factory",
             CommandError::RequiresTechLab => "requires a tech lab",
             CommandError::RequiresOreAdjacent => "refinery must be placed next to an ore tile",
+            CommandError::RequiresCrystalAdjacent => {
+                "crystal refinery must be placed next to a crystal field"
+            }
             CommandError::TileBlocked => "tile is blocked",
-            CommandError::TileHasOre => "tile contains ore",
+            CommandError::TileHasOre => "tile contains ore or crystal",
+            CommandError::RequiresTech => "unit requires a researched technology",
+            CommandError::TechPrereqNotMet => "research prerequisites not met",
+            CommandError::TechAlreadyResearched => "technology already researched",
+            CommandError::AlreadyResearching => "another technology is already being researched",
             CommandError::InvalidTile => "tile out of bounds",
             CommandError::TooFarFromBase => "too far from your base",
             CommandError::NotEnoughOre => "not enough ore",
@@ -137,7 +150,6 @@ impl std::fmt::Display for CommandError {
             CommandError::AlreadyRepaired => "building already repaired this turn",
             CommandError::BuildingFullHealth => "building at full health",
             CommandError::CantSellHq => "cannot sell the HQ",
-            CommandError::UpgradeAlreadyChosen => "upgrade already chosen",
             CommandError::NotYourTurn => "it is not your turn",
             CommandError::MatchOver => "the match is over",
             CommandError::RateLimited => "action budget exhausted for this turn",
@@ -177,23 +189,19 @@ impl Game {
                 units,
                 target,
             } => self.validate_attack(*player, units, *target),
-            Command::ChooseUpgrade {
-                player,
-                lab,
-                upgrade,
-            } => {
-                if *upgrade == Upgrade::None {
-                    return Err(UpgradeAlreadyChosen);
+            Command::StartResearch { player, tech } => {
+                if self.count_buildings(*player, BuildingType::TechLab) == 0 {
+                    return Err(RequiresTechLab);
                 }
-                let b = self.building(*player, *lab).ok_or(NotYourEntity)?;
-                if !b.is_alive() {
-                    return Err(EntityDead);
+                let r = &self.research[player.index()];
+                if r.has(*tech) {
+                    return Err(TechAlreadyResearched);
                 }
-                if b.btype != BuildingType::TechLab {
-                    return Err(NotABuilding);
+                if r.researching.is_some() {
+                    return Err(AlreadyResearching);
                 }
-                if self.upgrades[player.index()] != Upgrade::None {
-                    return Err(UpgradeAlreadyChosen);
+                if !prereqs_met(*tech, &r.researched) {
+                    return Err(TechPrereqNotMet);
                 }
                 Ok(())
             }
@@ -256,27 +264,35 @@ impl Game {
         if self.building_at(tile).is_some() {
             return Err(TileBlocked);
         }
-        if self.map.ore_at(tile.0, tile.1) > 0 {
+        if self.map.ore_at(tile.0, tile.1) > 0 || self.map.crystal_at(tile.0, tile.1) > 0 {
             return Err(TileHasOre);
         }
         let cost = building_stats(btype).cost;
         if self.ore[player.index()] < cost {
             return Err(NotEnoughOre);
         }
-        if btype == BuildingType::Refinery {
-            // Refineries must touch an ore field — that is their whole point
-            // under passive income. This replaces the clump rule for them:
-            // remote refineries are how you claim an expansion pocket.
+        if btype == BuildingType::Refinery || btype == BuildingType::CrystalRefinery {
+            // Refineries must touch their resource field — that is their whole
+            // point under passive income. This replaces the clump rule for
+            // them: remote refineries are how you claim an expansion pocket.
             let adjacent_ore = NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
                 let (x, y) = (tile.0 as i32 + dx, tile.1 as i32 + dy);
                 x >= 0
                     && y >= 0
                     && (x as usize) < crate::map::MAP_SIZE
                     && (y as usize) < crate::map::MAP_SIZE
-                    && self.map.ore_at(x as u8, y as u8) > 0
+                    && if btype == BuildingType::Refinery {
+                        self.map.ore_at(x as u8, y as u8) > 0
+                    } else {
+                        self.map.crystal_at(x as u8, y as u8) > 0
+                    }
             });
             if !adjacent_ore {
-                return Err(RequiresOreAdjacent);
+                return Err(if btype == BuildingType::Refinery {
+                    RequiresOreAdjacent
+                } else {
+                    RequiresCrystalAdjacent
+                });
             }
         } else if !self.near_own_building(player, tile) {
             return Err(TooFarFromBase);
@@ -302,6 +318,11 @@ impl Game {
             && self.count_buildings(player, BuildingType::TechLab) == 0
         {
             return Err(RequiresTechLab);
+        }
+        if let Some(tech) = unit_requires_tech(utype) {
+            if !self.research[player.index()].has(tech) {
+                return Err(RequiresTech);
+            }
         }
         let cost = unit_stats(utype).cost;
         if self.ore[player.index()] < cost {

@@ -35,6 +35,9 @@ pub struct FogMemory {
     pub buildings: Vec<RememberedBuilding>,
     /// Ore tiles this player has ever seen (fields don't move, but must be scouted).
     pub known_ore: Vec<bool>,
+    /// Crystal tiles this player has ever seen (same scouting contract as ore).
+    #[serde(default)]
+    pub known_crystal: Vec<bool>,
     /// Every tile this player has ever seen (monotonic; powers the AI's
     /// "unexplored fraction" observation). `#[serde(default)]` keeps old
     /// persisted states loadable — a missing field starts fully unexplored.
@@ -48,6 +51,7 @@ impl Default for FogMemory {
             units: Vec::new(),
             buildings: Vec::new(),
             known_ore: vec![false; MAP_TILES],
+            known_crystal: vec![false; MAP_TILES],
             explored: vec![false; MAP_TILES],
         }
     }
@@ -65,6 +69,7 @@ pub struct FogView {
     /// Enemy buildings, merged with current positions where visible.
     pub buildings: Vec<RememberedBuilding>,
     pub known_ore: Vec<bool>,
+    pub known_crystal: Vec<bool>,
     /// Every tile this player has ever seen.
     pub explored: Vec<bool>,
 }
@@ -134,6 +139,7 @@ impl Game {
             units,
             buildings,
             known_ore: mem.known_ore.clone(),
+            known_crystal: mem.known_crystal.clone(),
             explored: mem.explored.clone(),
         }
     }
@@ -169,6 +175,11 @@ impl Game {
         for (idx, &amount) in self.map.ore.iter().enumerate() {
             if amount > 0 && visible[idx] {
                 mem.known_ore[idx] = true;
+            }
+        }
+        for (idx, &amount) in self.map.crystal.iter().enumerate() {
+            if amount > 0 && visible[idx] {
+                mem.known_crystal[idx] = true;
             }
         }
 
