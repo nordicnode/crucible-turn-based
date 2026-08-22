@@ -2004,12 +2004,19 @@ function frame(ts: number): void {
   if (!inGame) {
     // Slow deterministic map tour: the menu shows terrain and resources
     // without a fake combat loop stealing focus from the actual game.
+    // Zoom in far enough that only a bounded tile window is drawn — the
+    // full 128x128 map at zoom 9 is ~16k tiles per frame and drags the
+    // menu to a crawl. The sweep radius keeps the view inside the map so
+    // the backdrop never shows void at the edges.
     if (!menuInit) initMenuTour();
     demoTime += dtSec;
     const sweepAngle = demoTime * 0.035;
-    const sweepX = 64 + Math.cos(sweepAngle) * 38;
-    const sweepY = 64 + Math.sin(sweepAngle * 0.83) * 32;
-    menuRenderer.camera.focusOn(sweepX, sweepY, 9, canvas.width, canvas.height);
+    const zoom = Math.max(28, Math.ceil(Math.max(canvas.width / 44, canvas.height / 26)));
+    const halfW = canvas.width / (2 * zoom);
+    const halfH = canvas.height / (2 * zoom);
+    const sweepX = 64 + Math.cos(sweepAngle) * Math.min(20, Math.max(6, halfW - 6));
+    const sweepY = 64 + Math.sin(sweepAngle * 0.83) * Math.min(13, Math.max(4, halfH - 6));
+    menuRenderer.camera.focusOn(sweepX, sweepY, zoom, canvas.width, canvas.height);
 
     menuRenderer.draw(ctx, menuWorld, new Set(), canvas.width, canvas.height);
   } else {
