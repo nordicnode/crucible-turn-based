@@ -62,6 +62,11 @@ function detPos(h: number, i: number, span: number): number {
   return ((h >>> (i * 7)) % 1000) * span / 1000;
 }
 
+/** Deterministic unit fraction in [0, 1) per tile. */
+function detFrac(h: number, i: number): number {
+  return ((h >>> (i * 7)) % 1000) / 1000;
+}
+
 /** A filled circle, integer-snapped, deterministic per tile. */
 function pCircle(
   ctx: CanvasRenderingContext2D,
@@ -201,8 +206,8 @@ export function drawPassableTile(
     // 3. Fine turf micro-texture & lawn blade stippling (organic green-on-green noise)
     const stippleCount = 3 + (h % 4);
     for (let s = 0; s < stippleCount; s++) {
-      const sx = px + 2 + detPos(h, s * 3 + 1, size - 4);
-      const sy = py + 2 + detPos(h, s * 3 + 2, size - 4);
+      const sx = px + (0.10 + 0.80 * detFrac(h, s * 3 + 1)) * size;
+      const sy = py + (0.10 + 0.80 * detFrac(h, s * 3 + 2)) * size;
       const stippleColor = s % 2 === 0 ? "#56793a" : "#243818";
       pRect(ctx, sx, sy, 1, 1, stippleColor);
       if (size >= 16 && s % 2 === 0) {
@@ -214,8 +219,8 @@ export function drawPassableTile(
     // 4. Expressive multi-blade grass tufts scattered deterministically
     const tuftCount = 2 + (h % 3);
     for (let i = 0; i < tuftCount; i++) {
-      const gx = px + 3 + detPos(h, i * 2, size - 8);
-      const gy = py + 3 + detPos(h, i * 2 + 3, size - 8);
+      const gx = px + (0.10 + 0.80 * detFrac(h, i * 2)) * size;
+      const gy = py + (0.10 + 0.80 * detFrac(h, i * 2 + 3)) * size;
       const tuftW = Math.max(1, size * 0.04);
       const tuftH = Math.max(3, size * 0.14);
       const lightCol = (h + i) % 2 === 0 ? "#688e49" : "#5a7e3d";
@@ -228,8 +233,8 @@ export function drawPassableTile(
 
     if (featureType === 0) {
       // Small 3-leaf clover clump
-      const clx = px + 3 + detPos(h, 7, size - 8);
-      const cly = py + 3 + detPos(h, 8, size - 8);
+      const clx = px + (0.12 + 0.76 * detFrac(h, 7)) * size;
+      const cly = py + (0.12 + 0.76 * detFrac(h, 8)) * size;
       pRect(ctx, clx, cly, 2, 2, "#2b441c");
       pRect(ctx, clx + 2, cly + 1, 2, 2, "#324e22");
       pRect(ctx, clx + 1, cly - 1, 2, 2, "#3a5828");
@@ -237,8 +242,8 @@ export function drawPassableTile(
     } else if (featureType === 1) {
       // Delicate meadow wildflower nestled in grass (single subtle bloom with stem)
       const flowerSub = (h >> 2) % 4;
-      const fx = px + 3 + detPos(h, 5, size - 8);
-      const fy = py + 3 + detPos(h, 6, size - 8);
+      const fx = px + (0.12 + 0.76 * detFrac(h, 5)) * size;
+      const fy = py + (0.12 + 0.76 * detFrac(h, 6)) * size;
 
       // Green flower stem
       pRect(ctx, fx, fy + 2, 1, 2, "#223618");
@@ -268,8 +273,8 @@ export function drawPassableTile(
       pRect(ctx, rx, ry + 1, 2, 1, "#443a2b");
     } else {
       // Extra blade cluster for lush grass variety
-      const ex = px + 3 + detPos(h, 9, size - 8);
-      const ey = py + 3 + detPos(h, 10, size - 8);
+      const ex = px + (0.12 + 0.76 * detFrac(h, 9)) * size;
+      const ey = py + (0.12 + 0.76 * detFrac(h, 10)) * size;
       pRect(ctx, ex, ey, 1, Math.max(2, Math.floor(size * 0.10)), "#253a1a");
       pRect(ctx, ex, ey - 1, 1, 1, "#658a47");
       pRect(ctx, ex + 1, ey, 1, Math.max(2, Math.floor(size * 0.08)), "#567c3b");
@@ -564,7 +569,9 @@ export function drawWaterTile(
     ctx.stroke();
 
     // 2. Animated horizontal drift ripples
-    const drift = ((Math.floor(tick * 0.8) + h) % Math.max(4, Math.floor(size * 0.8))) as number;
+    // Size-independent nibble so the ripple offset doesn't jump when zooming
+    // (it still derives from a per-tile hash + the animation tick).
+    const drift = ((Math.floor(tick * 0.8) + h) % 7);
     pRect(ctx, px + size * 0.36 + (drift % 6) - 3, py + size * 0.22, size * 0.22, 1, "#5cb8e8");
     pRect(ctx, px + size * 0.20 + ((drift + 4) % 6) - 3, py + size * 0.68, size * 0.26, 1, "#4090c4");
 
@@ -612,15 +619,17 @@ export function drawRiverTile(
 
   if (size >= 7) {
     // 1. Dynamic white-water current flow ribbons drifting with tick
-    const flow1 = ((Math.floor(tick * 1.5) + (h % 17)) % Math.max(4, Math.floor(size))) as number;
-    const flow2 = ((Math.floor(tick * 1.2) + ((h >> 4) % 23)) % Math.max(4, Math.floor(size))) as number;
+    // Unit-fraction drift so the ribbons wrap across the tile and stay anchored
+    // to its size (no jump when zooming), yet still flow with the animation tick.
+    const flow1 = ((Math.floor(tick * 1.5) + (h % 37)) % 100) / 100;
+    const flow2 = ((Math.floor(tick * 1.2) + ((h >> 4) % 43)) % 100) / 100;
 
     // Fast center stream ribbon
-    pRect(ctx, px + flow1, py + size * 0.36, Math.max(4, size * 0.30), Math.max(1, size * 0.05), "#dcf5ff");
-    pRect(ctx, px + ((flow1 + size * 0.45) % size), py + size * 0.44, Math.max(3, size * 0.22), Math.max(1, size * 0.04), "#a4e5ff");
+    pRect(ctx, px + flow1 * size, py + size * 0.36, Math.max(4, size * 0.30), Math.max(1, size * 0.05), "#dcf5ff");
+    pRect(ctx, px + ((flow1 + 0.45) % 1) * size, py + size * 0.44, Math.max(3, size * 0.22), Math.max(1, size * 0.04), "#a4e5ff");
     // Secondary flow stream
-    pRect(ctx, px + flow2, py + size * 0.58, Math.max(3, size * 0.24), Math.max(1, size * 0.04), "#6acbf7");
-    pRect(ctx, px + ((flow2 + size * 0.55) % size), py + size * 0.24, Math.max(3, size * 0.20), Math.max(1, size * 0.04), "#50bceb");
+    pRect(ctx, px + flow2 * size, py + size * 0.58, Math.max(3, size * 0.24), Math.max(1, size * 0.04), "#6acbf7");
+    pRect(ctx, px + ((flow2 + 0.55) % 1) * size, py + size * 0.24, Math.max(3, size * 0.20), Math.max(1, size * 0.04), "#50bceb");
 
     // 2. Submerged riverbed stones peeking through shallow edges
     const stoneX = px + size * 0.16;
