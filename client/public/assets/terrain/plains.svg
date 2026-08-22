@@ -1,18 +1,82 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#6a8e4e"/>
-      <stop offset="100%" stop-color="#587b40"/>
+      <stop offset="0%" stop-color="#4a6d34"/>
+      <stop offset="50%" stop-color="#3f5f2c"/>
+      <stop offset="100%" stop-color="#324c23"/>
     </linearGradient>
   </defs>
+
+  <!-- Base grassland tile -->
   <rect width="32" height="32" rx="3" fill="url(#pg)"/>
-  <rect width="32" height="10" rx="3" fill="#ffffff" opacity="0.08"/>
+
+  <!-- Gentle undulating turf contour layers -->
+  <path d="M0 13 Q8 9 17 12 T32 10 L32 32 L0 32 Z" fill="#385427" opacity="0.45"/>
+  <path d="M0 20 Q11 16 22 19 T32 17 L32 32 L0 32 Z" fill="#2d441f" opacity="0.4"/>
+
+  <!-- Background subtle grass blade flecks -->
   <g stroke-linecap="round">
-    <path d="M5 22v-4M7 22v-3" stroke="#8faf68" stroke-width="1.4"/>
-    <path d="M22 16v-4M24 16v-3" stroke="#47663a" stroke-width="1.4"/>
-    <path d="M14 10v-3M16 10v-2" stroke="#8faf68" stroke-width="1.4"/>
+    <path d="M4 11 L5 8 M6 11 L7 9" stroke="#5d823e" stroke-width="1.1"/>
+    <path d="M26 8 L27 5 M28 8 L29 6" stroke="#5d823e" stroke-width="1.1"/>
+    <path d="M14 7 L15 5 M16 7 L17 6" stroke="#527436" stroke-width="1"/>
   </g>
-  <circle cx="9" cy="12" r="1" fill="#b9c98a"/>
-  <circle cx="26" cy="25" r="1" fill="#cbb98c"/>
-  <rect x="2" y="2" width="28" height="28" rx="3" fill="none" stroke="#1e3424" stroke-opacity="0.35"/>
+
+  <!-- Main Left Grass Tuft (fanned blades, deep root shadow, sunlit highlights) -->
+  <g>
+    <!-- Root shadow -->
+    <ellipse cx="9" cy="24" rx="4" ry="1.2" fill="#182611" opacity="0.6"/>
+    <!-- Outer left blade -->
+    <path d="M9 24 Q6 20 4 15" fill="none" stroke="#2e461f" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M9 24 Q6 20 4 15" fill="none" stroke="#688e49" stroke-width="0.9" stroke-linecap="round"/>
+    <!-- Center tall blade -->
+    <path d="M9 24 Q9 18 8 11" fill="none" stroke="#253a19" stroke-width="2" stroke-linecap="round"/>
+    <path d="M9 24 Q9 18 8 11" fill="none" stroke="#7aa456" stroke-width="1" stroke-linecap="round"/>
+    <!-- Inner right blade -->
+    <path d="M9 24 Q11 19 13 14" fill="none" stroke="#2e461f" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M9 24 Q11 19 13 14" fill="none" stroke="#688e49" stroke-width="0.9" stroke-linecap="round"/>
+    <!-- Leaning right blade -->
+    <path d="M9 24 Q13 21 16 18" fill="none" stroke="#3b5828" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M9 24 Q13 21 16 18" fill="none" stroke="#80aa5c" stroke-width="0.7" stroke-linecap="round"/>
+  </g>
+
+  <!-- Main Right Grass Tuft -->
+  <g>
+    <!-- Root shadow -->
+    <ellipse cx="23" cy="22" rx="4.5" ry="1.3" fill="#182611" opacity="0.6"/>
+    <!-- Left leaning blade -->
+    <path d="M23 22 Q19 18 17 13" fill="none" stroke="#2e461f" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M23 22 Q19 18 17 13" fill="none" stroke="#688e49" stroke-width="0.9" stroke-linecap="round"/>
+    <!-- Center tall blade -->
+    <path d="M23 22 Q23 16 22 9" fill="none" stroke="#253a19" stroke-width="2" stroke-linecap="round"/>
+    <path d="M23 22 Q23 16 22 9" fill="none" stroke="#7aa456" stroke-width="1" stroke-linecap="round"/>
+    <!-- Right blade -->
+    <path d="M23 22 Q26 17 28 12" fill="none" stroke="#2e461f" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M23 22 Q26 17 28 12" fill="none" stroke="#688e49" stroke-width="0.9" stroke-linecap="round"/>
+    <!-- Outer right blade -->
+    <path d="M23 22 Q27 20 30 17" fill="none" stroke="#3b5828" stroke-width="1.3" stroke-linecap="round"/>
+    <path d="M23 22 Q27 20 30 17" fill="none" stroke="#80aa5c" stroke-width="0.7" stroke-linecap="round"/>
+  </g>
+
+  <!-- Foreground mini tuft & clover -->
+  <g>
+    <path d="M15 28 Q13 25 12 21" fill="none" stroke="#5d823e" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M15 28 Q16 24 16 19" fill="none" stroke="#729a50" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M15 28 Q18 25 19 22" fill="none" stroke="#5d823e" stroke-width="1.3" stroke-linecap="round"/>
+
+    <!-- Clover leaf cluster -->
+    <circle cx="28" cy="26.5" r="1.4" fill="#3b5828"/>
+    <circle cx="29.5" cy="25.5" r="1.3" fill="#44662e"/>
+    <circle cx="27" cy="25.3" r="1.3" fill="#4d7234"/>
+    <circle cx="28.2" cy="25.8" r="0.6" fill="#78a254"/>
+  </g>
+
+  <!-- Delicate yellow buttercup blossom -->
+  <g>
+    <path d="M5 28 Q5 26 6 25" stroke="#2c421e" stroke-width="1" fill="none"/>
+    <circle cx="6" cy="24.5" r="1.5" fill="#eab308"/>
+    <circle cx="6" cy="24.5" r="0.6" fill="#ca8a04"/>
+  </g>
+
+  <!-- Frame border matching tactical biome tiles -->
+  <rect x="2" y="2" width="28" height="28" rx="3" fill="none" stroke="#162713" stroke-opacity="0.38"/>
 </svg>

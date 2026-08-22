@@ -633,10 +633,10 @@
         color: var(--ivory);
         border-radius: 3px;
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-        padding: 8px 14px;
+        padding: 5px 11px;
         cursor: pointer;
         font-family: var(--serif);
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 700;
         letter-spacing: 0.1em;
         text-transform: uppercase;
@@ -662,10 +662,10 @@
         -webkit-backdrop-filter: blur(8px);
         border: 1px solid var(--line-hi);
         border-radius: 5px;
-        padding: 26px 36px;
-        max-width: 560px;
+        padding: 16px 26px;
+        max-width: 470px;
         text-align: center;
-        box-shadow: 0 14px 44px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        box-shadow: 0 12px 34px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       }
       .live-feed-badge {
         position: absolute;
@@ -685,23 +685,23 @@
       }
       .rec-dot { width: 7px; height: 7px; background: #c05444; border-radius: 50%; box-shadow: 0 0 8px #c05444; animation: blink 1.2s infinite; }
       @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
-      .logo-box { margin-bottom: 18px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+      .logo-box { margin-bottom: 10px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
       .crucible-emblem {
-        margin: 0 auto 10px;
-        max-width: 420px;
+        margin: 0 auto 6px;
+        max-width: 360px;
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 16px;
-        padding: 10px 20px;
+        gap: 10px;
+        padding: 6px 14px;
         border-top: 1px solid var(--line-hi);
         border-bottom: 1px solid var(--line-hi);
       }
       .emblem-mark {
         display: grid;
         place-items: center;
-        width: 18px;
-        height: 18px;
+        width: 13px;
+        height: 13px;
         color: var(--gold);
         border: 1px solid var(--gold);
         font-weight: 700;
@@ -711,9 +711,9 @@
       .emblem-word {
         color: var(--gold-bright);
         font-family: var(--serif);
-        font-size: clamp(1.6rem, 6vw, 2.4rem);
+        font-size: clamp(1.15rem, 4.5vw, 1.7rem);
         font-weight: 700;
-        letter-spacing: 0.3em;
+        letter-spacing: 0.26em;
         text-shadow: 0 2px 0 #0a0d13;
       }
       .logo-title {
@@ -725,8 +725,8 @@
         margin: 0;
         font-family: var(--serif);
       }
-      .logo-sub { font-size: 9.5px; letter-spacing: 0.3em; color: var(--muted); text-transform: uppercase; margin-top: 4px; font-weight: 600; }
-      .panel .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+      .logo-sub { font-size: 8px; letter-spacing: 0.3em; color: var(--muted); text-transform: uppercase; margin-top: 3px; font-weight: 600; }
+      .panel .row { display: flex; gap: 7px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
       .hidden { display: none !important; }
       .win { color: var(--green); text-shadow: 0 0 10px rgba(116, 176, 138, 0.5); }
       .lose { color: var(--red); text-shadow: 0 0 10px rgba(208, 120, 104, 0.5); }
@@ -1040,7 +1040,7 @@
       }
       .inspector-legend span { display: inline-flex; align-items: center; gap: 4px; }
       .legend-dot { width: 7px; height: 7px; border-radius: 1px; display: inline-block; border: 1px solid rgba(255,255,255,.2); }
-      .legend-plains { background: #324b37; }
+      .legend-plains { background: #41602e; }
       .legend-forest { background: #285638; }
       .legend-hills { background: #705d3c; }
       .legend-desert { background: #8f6c3d; }
@@ -1303,14 +1303,14 @@
           <div class="logo-sub">Turn-Based Strategic Command</div>
         </div>
 
-        <p style="color:#cfc5ae; margin-bottom: 16px; font-size:12px; font-weight:700;">SELECT OPPONENT TO ENGAGE:</p>
-        <p id="lobby-status" class="muted" style="min-height:1.2em; margin-top:-8px;"></p>
+        <p style="color:#cfc5ae; margin-bottom: 9px; font-size:11px; font-weight:700;">SELECT OPPONENT TO ENGAGE:</p>
+        <p id="lobby-status" class="muted" style="min-height:1.1em; margin-top:-6px;"></p>
         <div class="row">
           <button class="btn" data-opp="easy">Easy (Turtle)</button>
           <button class="btn" data-opp="medium">Medium (Waves)</button>
           <button class="btn" data-opp="hard">Hard (Expand)</button>
         </div>
-        <div class="row" style="margin-top:10px;">
+        <div class="row">
           <button class="btn" id="adaptive-btn" style="border-color:var(--green); color:var(--green);">Adaptive AI</button>
           <span id="lobby-tier" class="muted" style="align-self:center; font-size:11px;"></span>
         </div>
@@ -1321,7 +1321,7 @@
           <button class="btn" id="resume-btn" data-opp="saved" data-label="saved match">Resume Saved Match</button>
         </div>
         <div class="row" id="museum-opps"></div>
-        <div class="row" style="margin-top:20px; border-top:1px solid var(--line); padding-top:14px;">
+        <div class="row" style="margin-top:12px; border-top:1px solid var(--line); padding-top:9px;">
           <button class="btn" id="open-dashboard">Dashboard &amp; Lineage</button>
           <button class="btn" id="open-spectate">Replay Archives</button>
         </div>
