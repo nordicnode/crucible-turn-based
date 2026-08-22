@@ -49,6 +49,9 @@ export class World {
   resourceTiles = new Map<string, ResourceTile>();
   /** Latest server-authoritative inspection response for the selected tile. */
   tileInspection: TileInspection | null = null;
+  /** Bumped on every state change; used to invalidate render caches (path
+   *  previews) so a hover is not served stale geometry after a diff. */
+  revision = 0;
   /** Legacy projections used by old fixtures and replay metadata. */
   oreTiles = new Map<string, OreTile>();
   crystalTiles = new Map<string, CrystalTile>();
@@ -116,6 +119,7 @@ export class World {
     temperature: number[] = [],
   ): void {
     this.mapSeed = mapSeed;
+    this.revision += 1;
     this.passable = passable;
     this.terrain = terrain;
     this.terrainRules = new Map(terrainRules.map((rule) => [rule.kind, rule]));
@@ -175,6 +179,7 @@ export class World {
     this.serverPower = power ?? null;
     this.tileInspection = null;
     this.entities = new Map(entities.map((e) => [e.id, e]));
+    this.revision += 1;
     this.resourceTiles = new Map(resourceTiles.map((t) => [`${t.x},${t.y}`, t]));
     this.oreTiles = new Map(oreTiles.map((t) => [`${t.x},${t.y}`, t]));
     this.crystalTiles = new Map(crystalTiles.map((t) => [`${t.x},${t.y}`, t]));

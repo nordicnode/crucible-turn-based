@@ -31,6 +31,14 @@ pub enum Command {
         building: EntityId,
         utype: UnitType,
     },
+    /// Set a production rally point: newly-trained units from `building`
+    /// auto-march toward `waypoint` at spawn. Only production buildings accept
+    /// a rally; units path toward the waypoint with their spawn MP.
+    SetRally {
+        player: Player,
+        building: EntityId,
+        waypoint: (u8, u8),
+    },
     /// Move a group of units toward a waypoint. Each unit walks as far along
     /// its own path as its remaining movement points allow.
     MoveGroup {
@@ -78,6 +86,7 @@ impl Command {
         match self {
             Command::PlaceBuilding { player, .. }
             | Command::TrainUnit { player, .. }
+            | Command::SetRally { player, .. }
             | Command::MoveGroup { player, .. }
             | Command::ClearMove { player, .. }
             | Command::Attack { player, .. }
@@ -199,6 +208,11 @@ impl Game {
                 building,
                 utype,
             } => self.validate_train(*player, *building, *utype),
+            Command::SetRally {
+                player,
+                building,
+                waypoint,
+            } => self.validate_rally(*player, *building, *waypoint),
             Command::MoveGroup {
                 player,
                 units,
@@ -346,6 +360,26 @@ impl Game {
         Ok(())
     }
 
+    fn validate_rally(
+        &self,
+        player: Player,
+        building: EntityId,
+        waypoint: (u8, u8),
+    ) -> Result<(), CommandError> {
+        use CommandError::*;
+        // The rally target must be a real, passable tile (it need not be
+        // empty — units path to its edge).
+        self.validate_tile(waypoint)?;
+        let b = self.building(player, building).ok_or(NotYourEntity)?;
+        if !b.is_alive() {
+            return Err(EntityDead);
+        }
+        if building_produces(b.btype).is_empty() {
+            return Err(BuildingCannotTrain);
+        }
+        Ok(())
+    }
+
     fn validate_move(
         &self,
         player: Player,
@@ -415,13 +449,16 @@ impl Game {
                     .map(|b| b.tile)
             })
             .ok_or(NoSuchTarget)?;
-        // At least one ordered unit must actually be able to strike.
+        // At least one ordered unit must actually be able to strike from where
+        // it will be once its pending move resolves this activation (so a
+        // unit marched adjacent can fire in the same activation).
         let any_in_range = units.iter().any(|&id| {
             let Some(u) = self.unit(player, id) else {
                 return false;
             };
             let stats = unit_stats(u.utype);
-            let d = crate::tiles::chebyshev(u.tile.0, u.tile.1, target_pos.0, target_pos.1);
+            let origin = self.attack_origin(u);
+            let d = crate::tiles::chebyshev(origin.0, origin.1, target_pos.0, target_pos.1);
             d <= stats.range_tiles && d >= stats.min_range_tiles
         });
         if !any_in_range {

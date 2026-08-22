@@ -47,6 +47,7 @@ fn spawn_building(g: &mut Game, p: Player, bt: BuildingType, tile: (u8, u8)) -> 
         construction_progress: stats.build_time_turns,
         cooldown: 0,
         repaired_this_turn: false,
+        rally: None,
     });
     id
 }
@@ -481,4 +482,152 @@ fn nearest_ore(g: &Game) -> (u8, u8) {
         }
     }
     best.unwrap().1
+}
+
+#[test]
+fn move_then_attack_from_destination_adjacent() {
+    let mut g = open_game(10_000);
+    // Tank at (30,30), enemy at (32,30): two tiles apart (range-1 Tank cannot
+    // reach). Order a move one tile toward the enemy (to (31,30)), then attack.
+    let tank = spawn_unit(&mut g, Player::P0, UnitType::Tank, (30, 30));
+    let enemy = spawn_unit(&mut g, Player::P1, UnitType::Infantry, (32, 30));
+    // A live unit has full MP for its activation (the spawn helper defaults to 0).
+    for u in g.units.iter_mut() {
+        if u.id == tank || u.id == enemy {
+            u.mp = unit_stats(u.utype).mp;
+        }
+    }
+    let mv = g.apply_commands(
+        Player::P0,
+        &[Command::MoveGroup {
+            player: Player::P0,
+            units: vec![tank],
+            waypoint: (31, 30),
+        }],
+    );
+    assert_eq!(mv, vec![Ok(())], "move order should apply");
+    let atk = g.apply_commands(
+        Player::P0,
+        &[Command::Attack {
+            player: Player::P0,
+            units: vec![tank],
+            target: enemy,
+        }],
+    );
+    assert_eq!(
+        atk,
+        vec![Ok(())],
+        "attack from the move destination should resolve"
+    );
+}
+
+#[test]
+fn rally_point_routes_newly_trained_units() {
+    let mut g = open_game(1000);
+    let hq = g.hq(Player::P0).unwrap().tile;
+    g.apply_commands(
+        Player::P0,
+        &[Command::PlaceBuilding {
+            player: Player::P0,
+            btype: BuildingType::Barracks,
+            tile: (hq.0 + 1, hq.1),
+        }],
+    );
+    let barracks = g
+        .buildings
+        .iter()
+        .find(|b| b.owner == Player::P0 && b.btype == BuildingType::Barracks)
+        .unwrap()
+        .id;
+    // Operational after its two-turn construction.
+    for _ in 0..2 {
+        g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+        g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    }
+
+    // A non-producer (the HQ) cannot accept a rally point.
+    let bad = g.apply_commands(
+        Player::P0,
+        &[Command::SetRally {
+            player: Player::P0,
+            building: g.hq(Player::P0).unwrap().id,
+            waypoint: (40, 40),
+        }],
+    );
+    assert_eq!(
+        bad,
+        vec![Err(crucible_sim::CommandError::BuildingCannotTrain)]
+    );
+
+    // Waypoint must be in-bounds; setting on own producer is fine.
+    let oob = g.apply_commands(
+        Player::P0,
+        &[Command::SetRally {
+            player: Player::P0,
+            building: barracks,
+            waypoint: (200, 40),
+        }],
+    );
+    assert_eq!(oob, vec![Err(crucible_sim::CommandError::InvalidTile)]);
+
+    // Rally ~25 tiles north (open map: passable, unreachable in one turn).
+    let rally = (
+        hq.0.saturating_sub(25).max(2),
+        hq.1.saturating_sub(5).max(2),
+    );
+    let set = g.apply_commands(
+        Player::P0,
+        &[Command::SetRally {
+            player: Player::P0,
+            building: barracks,
+            waypoint: rally,
+        }],
+    );
+    assert_eq!(set, vec![Ok(())]);
+    assert_eq!(g.building(Player::P0, barracks).unwrap().rally, Some(rally));
+
+    // Clear by setting the rally to the building's own tile.
+    let clear = g.apply_commands(
+        Player::P0,
+        &[Command::SetRally {
+            player: Player::P0,
+            building: barracks,
+            waypoint: g.building(Player::P0, barracks).unwrap().tile,
+        }],
+    );
+    assert_eq!(clear, vec![Ok(())]);
+    assert_eq!(g.building(Player::P0, barracks).unwrap().rally, None);
+
+    // Re-set, then train: the spawned infanty should auto-march to the rally.
+    g.apply_commands(
+        Player::P0,
+        &[Command::SetRally {
+            player: Player::P0,
+            building: barracks,
+            waypoint: rally,
+        }],
+    );
+    g.apply_commands(
+        Player::P0,
+        &[Command::TrainUnit {
+            player: Player::P0,
+            building: barracks,
+            utype: UnitType::Infantry,
+        }],
+    );
+    let before = g.units.len();
+    g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+    g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    assert_eq!(g.units.len(), before + 1, "infantry did not spawn");
+
+    let spawned = g.units.last().unwrap();
+    assert_eq!(
+        spawned.move_target,
+        Some(rally),
+        "trained unit should march toward the rally point"
+    );
+    assert!(
+        spawned.moved,
+        "trained unit should have begun routing toward the rally"
+    );
 }

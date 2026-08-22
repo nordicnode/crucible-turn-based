@@ -144,9 +144,10 @@ export function inspectTile(
   }
 
   const routeTargets = known
-    ? [...world.ownUnits]
-      .filter((entity) => entity.moveTarget)
-      .map((entity) => ({ id: entity.id, target: entity.moveTarget! }))
+    ? [...world.ownUnits].flatMap((entity) => {
+        const target = entity.moveTarget;
+        return target ? [{ id: entity.id, target }] : [];
+      })
     : [];
 
   return {

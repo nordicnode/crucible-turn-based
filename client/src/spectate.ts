@@ -178,7 +178,10 @@ class Spectate {
     const dt = Math.min(0.25, (now - this.lastTime) / 1000);
     this.lastTime = now;
 
-    if (this.playing && this.replayJson != null) {
+    if (this.playing && this.replayJson != null && !this.loading) {
+      // Freeze the clock while a wasm frame is in flight: otherwise `turn`
+      // keeps climbing during a slow frame load and the HUD steward overshoots
+      // the rendered turn, causing a rubber-band / out-of-order scrub.
       this.turn += dt * TURNS_PER_SEC * SPEEDS[this.speedIndex];
       if (this.turn >= this.duration) {
         this.turn = this.duration;

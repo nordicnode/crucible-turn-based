@@ -587,6 +587,9 @@ pub struct Building {
     /// Whether this building was repaired already this turn.
     #[serde(default)]
     pub repaired_this_turn: bool,
+    /// Production rally point: newly-trained units auto-march here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rally: Option<(u8, u8)>,
 }
 
 impl Building {

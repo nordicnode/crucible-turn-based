@@ -136,7 +136,23 @@ pub(crate) fn find_build_tile(
                 (g.map.resource_amount_at(t.0, t.1) > 0).then_some((idx, t))
             })
             .collect();
-        fields.sort_by_key(|&(idx, t)| (chebyshev(t.0, t.1, preferred.0, preferred.1), idx));
+        // Prefer ore first: a generic refinery yields its deposit's resource,
+        // and the opening refinery must feed the ore economy. Once deposits
+        // of every kind sit close to spawn (they now do), nearest-first alone
+        // would strand the first refinery on steel/coal and starve ore.
+        fields.sort_by_key(|&(idx, t)| {
+            let kind_rank = match g.map.resource_at(t.0, t.1) {
+                Some(ResourceType::Ore) => 0,
+                Some(ResourceType::Steel) => 1,
+                Some(ResourceType::Coal) => 2,
+                _ => 3,
+            };
+            (
+                kind_rank,
+                chebyshev(t.0, t.1, preferred.0, preferred.1),
+                idx,
+            )
+        });
         for (_, field_tile) in fields {
             if free(field_tile) {
                 return Some(field_tile);

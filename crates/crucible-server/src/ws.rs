@@ -19,6 +19,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crucible_ai::{drive_bot_turn, easy, hard, medium, Bot, GenomeBot};
@@ -36,6 +37,11 @@ const MAX_COMMANDS_PER_MESSAGE: usize = 8;
 const MAX_MOVE_GROUP_UNITS: usize = 32;
 const MAX_MOVE_GROUP_UNITS_PER_BATCH: usize = 64;
 const COMMAND_CHANNEL_CAPACITY: usize = 4;
+/// How long an in-match connection may stay idle (no command or inspection)
+/// before the server abandons it. A connection that joins but never plays
+/// would otherwise squat on a `MAX_LIVE_MATCHES` slot and a socket forever.
+/// Overridable for smoke tests via `CRUCIBLE_IDLE_TIMEOUT_SECS`.
+const MATCH_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Inputs are kept on one bounded channel so inspection requests cannot create
 /// an unbounded side queue while the bot is taking its turn.
@@ -61,6 +67,11 @@ enum ClientMsg {
     /// End the active player's turn (only valid from `game.active`; the sim
     /// runs the full lifecycle: turret fire → income → production → opponent).
     EndTurn,
+    /// Client keepalive heartbeat. Parsed so the server logs it as a normal
+    /// control frame rather than an unparseable message; no reply is needed
+    /// (the client's liveness detection rides on any server traffic + TCP
+    /// close).
+    Ping,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -207,6 +218,10 @@ struct DiffEntity {
     /// Construction duration of an owned building, in turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     construction_time: Option<i32>,
+    /// Production rally point (own production buildings only): newly-trained
+    /// units auto-march here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rally: Option<(u8, u8)>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -384,7 +399,9 @@ async fn run(
         let store2 = store.clone();
         resume = tokio::task::spawn_blocking(move || {
             let save = store2.latest_save().ok().flatten()?;
-            let game: Game = serde_json::from_str(&save.game_json).ok()?;
+            let game: Game = serde_json::from_str(&save.game_json)
+                .ok()
+                .filter(|g: &Game| g.validate())?;
             let mut replay = Replay::from_json(&save.replay_json).ok()?;
             replay.result = None; // the resumed match re-records its outcome
             let _ = store2.delete_save(&save.key); // saves are single-use
@@ -450,8 +467,14 @@ async fn run(
         .await?;
 
     // Incoming commands and tile-inspection requests are buffered on a
-    // bounded channel by a reader task.
+    // bounded channel by a reader task. If a client floods faster than the
+    // match loop drains, some inputs are dropped; the counter lets the loop
+    // surface that to the client instead of dropping silently (raw sink writes
+    // from the reader task would race the match loop, so the reader only
+    // counts and the loop sends the rejection).
     let (tx, mut rx) = mpsc::channel::<ClientInput>(COMMAND_CHANNEL_CAPACITY);
+    let dropped: Arc<std::sync::atomic::AtomicUsize> = Arc::new(Default::default());
+    let dropped_reader = dropped.clone();
     tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(t) = msg {
@@ -462,6 +485,7 @@ async fn run(
                             continue;
                         }
                         if tx.try_send(ClientInput::Commands(cmds)).is_err() {
+                            dropped_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::warn!("dropping command batch: pending input limit reached");
                         }
                     }
@@ -474,15 +498,18 @@ async fn run(
                             }]))
                             .is_err()
                         {
+                            dropped_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::warn!("dropping EndTurn: pending input limit reached");
                         }
                     }
                     Ok(ClientMsg::InspectTile { x, y }) => {
                         if tx.try_send(ClientInput::InspectTile { x, y }).is_err() {
+                            dropped_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tracing::warn!("dropping tile inspection: pending input limit reached");
                         }
                     }
                     Ok(ClientMsg::JoinMatch { .. }) => {}
+                    Ok(ClientMsg::Ping) => {}
                     // Never drop a malformed command silently: a wire-format
                     // drift (e.g. player as index vs "P0") otherwise looks
                     // like the game ignoring the player.
@@ -509,10 +536,34 @@ async fn run(
     // still persisted as a partial replay instead of being lost entirely.
     let result = match (async {
         loop {
-            // P0's activation: wait for their next batch. Nothing happens
-            // between batches — the sim has no wall clock.
-            let human_cmds = match rx.recv().await.ok_or("client closed the connection")? {
-                ClientInput::InspectTile { x, y } => {
+            // Surface any inputs the reader had to drop because the client
+            // out-paced the match loop, so a dropped command never looks like
+            // the game silently ignoring the player. CommandRejected is only
+            // ever sent from here (the reader owns the sink-free channel side).
+            if dropped.swap(0, std::sync::atomic::Ordering::Relaxed) > 0 {
+                sender
+                    .send(Message::Text(
+                        serde_json::to_string(&ServerMsg::CommandRejected(CommandRejectedMsg {
+                            index: 0,
+                            reason: "one or more commands dropped: pending input limit reached"
+                                .into(),
+                        }))?
+                        .into(),
+                    ))
+                    .await?;
+            }
+            // P0's activation: wait for their next batch with an idle deadline.
+            // P0's activation: wait for their next batch with an idle deadline.
+            // Nothing happens between batches — the sim has no wall clock. A
+            // silent connection is reaped (abandoned + saved) rather than
+            // squatting on a live-match slot indefinitely.
+            let human_cmds = match tokio::time::timeout(MATCH_IDLE_TIMEOUT, rx.recv()).await {
+                Err(_) => {
+                    tracing::debug!("live match idled out; abandoning");
+                    return Err("client idle: abandoned by server".into());
+                }
+                Ok(None) => return Err("client closed the connection".into()),
+                Ok(Some(ClientInput::InspectTile { x, y })) => {
                     if let Some(inspection) = build_tile_inspection(&game, x, y) {
                         sender
                             .send(Message::Text(
@@ -523,7 +574,7 @@ async fn run(
                     }
                     continue;
                 }
-                ClientInput::Commands(cmds) => cmds,
+                Ok(Some(ClientInput::Commands(cmds))) => cmds,
             };
             if human_cmds.is_empty() {
                 continue;
@@ -759,6 +810,7 @@ fn build_tile_inspection(game: &Game, x: u8, y: u8) -> Option<TileInspectionMsg>
                     build_time: None,
                     construction_progress: None,
                     construction_time: None,
+                    rally: None,
                 });
             }
         }
@@ -782,6 +834,7 @@ fn build_tile_inspection(game: &Game, x: u8, y: u8) -> Option<TileInspectionMsg>
                     build_time: None,
                     construction_progress: None,
                     construction_time: None,
+                    rally: None,
                 });
             }
         }
@@ -991,6 +1044,7 @@ fn diff_unit(game: &Game, unit: &crucible_sim::Unit, stale: Option<i32>) -> Diff
         build_time: None,
         construction_progress: None,
         construction_time: None,
+        rally: None,
     }
 }
 
@@ -1029,6 +1083,7 @@ fn diff_building(_game: &Game, building: &crucible_sim::Building) -> DiffEntity 
         build_time,
         construction_progress: Some(building.construction_progress),
         construction_time: Some(building.construction_time()),
+        rally: building.rally,
     }
 }
 
@@ -1056,6 +1111,7 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 build_time: None,
                 construction_progress: None,
                 construction_time: None,
+                rally: None,
             });
         }
     }
@@ -1089,6 +1145,7 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 build_time,
                 construction_progress: Some(b.construction_progress),
                 construction_time: Some(b.construction_time()),
+                rally: b.rally,
             });
         }
     }
@@ -1112,6 +1169,7 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             build_time: None,
             construction_progress: None,
             construction_time: None,
+            rally: None,
         });
     }
     for m in &view.buildings {
@@ -1133,6 +1191,7 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             build_time: None,
             construction_progress: None,
             construction_time: None,
+            rally: None,
         });
     }
     let mut resource_tiles = Vec::new();

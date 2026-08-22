@@ -17,7 +17,7 @@ use crate::entity::{
     REFINERY_BASE_YIELD_PER_TURN, REPAIR_COST_DEN, REPAIR_COST_NUM, REPAIR_HP_DEN, REPAIR_HP_NUM,
     REPAIR_MIN_COST, RESEARCH_PER_LAB_PER_TURN,
 };
-use crate::map::Map;
+use crate::map::{Map, MAP_SIZE, MAP_TILES};
 use crate::orders::{Command, CommandError, NEIGHBOR_OFFSETS};
 use crate::tech::{tech_info, TechId};
 use crate::tiles::within_range;
@@ -286,6 +286,7 @@ impl Game {
                 construction_progress: 0,
                 cooldown: 0,
                 repaired_this_turn: false,
+                rally: None,
             });
             next_id += 1;
         }
@@ -599,6 +600,7 @@ impl Game {
                     construction_progress: 0,
                     cooldown: 0,
                     repaired_this_turn: false,
+                    rally: None,
                 });
                 self.push_event(EventKind::BuildingPlaced {
                     player,
@@ -614,6 +616,19 @@ impl Game {
                 let _ = self.spend_resources(player, stats.resource_cost);
                 if let Some(b) = self.building_mut(player, building) {
                     b.queue.push(utype);
+                }
+            }
+            Command::SetRally {
+                building, waypoint, ..
+            } => {
+                // Setting the rally to the building's own tile clears it
+                // (right-click the producer to unset the point).
+                if let Some(b) = self.building_mut(player, building) {
+                    b.rally = if waypoint == b.tile {
+                        None
+                    } else {
+                        Some(waypoint)
+                    };
                 }
             }
             Command::MoveGroup {
@@ -818,6 +833,51 @@ impl Game {
         }
     }
 
+    /// The tile a unit with a pending move order will occupy once its move
+    /// resolves this activation — walk toward `move_target` as far as current
+    /// MP allows, stopping before blocked/occupied tiles (identical walk logic
+    /// to `resolve_unit_move`, read-only). Used so a move-then-fire attack
+    /// originates from where the unit will be at end of activation, not from
+    /// its pre-move origin — otherwise right-clicking a just-marched unit's
+    /// target always reports "out of range". Pure (no mutation), so it is
+    /// safe to call from validation and stays deterministic.
+    pub(crate) fn attack_origin(&self, u: &crate::entity::Unit) -> (u8, u8) {
+        let Some(target) = u.move_target else {
+            return u.tile;
+        };
+        if u.mp <= 0 {
+            return u.tile;
+        }
+        let from = u.tile;
+        let fly = unit_stats(u.utype).air;
+        let blocked = self.blocked_grid();
+        let mut target_tile = target;
+        if !fly && blocked[crate::map::tile_index(target_tile.0, target_tile.1)] {
+            target_tile = self.nearest_free_tile(target_tile).unwrap_or(target_tile);
+        }
+        let Some(path) = self.map.find_path(from, target_tile, &blocked, fly) else {
+            return u.tile;
+        };
+        let mut spent = 0i32;
+        let mut dest = from;
+        for &next in &path {
+            let cost = self.map.move_cost(dest, next, fly);
+            if spent + cost > u.mp {
+                break;
+            }
+            if self.unit_at(next).is_some_and(|occupant| occupant != u.id) {
+                break;
+            }
+            spent += cost;
+            dest = next;
+        }
+        if spent > 0 {
+            dest
+        } else {
+            u.tile
+        }
+    }
+
     /// Preview the deterministic route for a unit's current durable order.
     /// This is presentation data only; execution still happens through the
     /// same server-side resolver.
@@ -921,7 +981,15 @@ impl Game {
             if !u.is_alive() || u.acted {
                 continue;
             }
-            let (utype, owner, hp, max_hp, tile) = (u.utype, u.owner, u.hp, u.max_hp, u.tile);
+            let (utype, owner, hp, max_hp, tile) = (
+                u.utype,
+                u.owner,
+                u.hp,
+                u.max_hp,
+                // Fire from where the unit will be after its pending move
+                // resolves this activation (move-then-fire), not its origin.
+                self.attack_origin(u),
+            );
             let stats = unit_stats(utype);
             let range = self.effective_range(utype, owner);
             let d = crate::tiles::chebyshev(tile.0, tile.1, target_tile.0, target_tile.1);
@@ -1253,7 +1321,8 @@ impl Game {
                     b.progress = 0;
                     b.queue.remove(0);
                 }
-                self.spawn_unit(player, item, spawn_tile, None);
+                let rally = self.building(player, bid).and_then(|b| b.rally);
+                self.spawn_unit(player, item, spawn_tile, rally);
             }
         }
 
@@ -1328,7 +1397,7 @@ impl Game {
         owner: Player,
         utype: UnitType,
         tile: (u8, u8),
-        _rally: Option<(u8, u8)>,
+        rally: Option<(u8, u8)>,
     ) {
         let stats = unit_stats(utype);
         let max_hp = self.effective_max_hp(utype, owner);
@@ -1342,7 +1411,7 @@ impl Game {
             hp: max_hp,
             max_hp,
             mp: stats.mp,
-            move_target: None,
+            move_target: rally,
             moved: false,
             acted: false,
         });
@@ -1410,9 +1479,44 @@ impl Game {
     /// Used for the map-control victory condition.
     pub fn map_control_percent(&self, player: Player) -> i32 {
         let view = self.fog_view(player);
-        let explored = view.explored.iter().filter(|&&e| e).count();
+        // Count only passable explored tiles so an impassable lake/mountain in
+        // view can't inflate the numerator past 100% (pure scouting shouldn't
+        // be able to win map control).
+        let explored = view
+            .explored
+            .iter()
+            .zip(&self.map.passable)
+            .filter(|&(&e, &p)| e && p)
+            .count();
         let passable = self.map.passable.iter().filter(|&&p| p).count().max(1);
-        (explored * 100 / passable) as i32
+        ((explored * 100 / passable).min(100)) as i32
+    }
+
+    /// Integrity check for deserialized state: every reachable grid struct
+    /// must be well-formed before any fog/pathfinding accessor indexes into
+    /// the tile arrays. Returns `false` (rather than panicking) so a corrupt
+    /// or crafted save is rejected at the load boundary instead of crashing a
+    /// handler task further down the line.
+    pub fn validate(&self) -> bool {
+        let m = &self.map;
+        let len_ok = m.passable.len() == MAP_TILES
+            && m.terrain.len() == MAP_TILES
+            && m.elevation.len() == MAP_TILES
+            && m.moisture.len() == MAP_TILES
+            && m.temperature.len() == MAP_TILES
+            && m.resource_kind.len() == MAP_TILES
+            && m.richness.len() == MAP_TILES
+            && m.ore.len() == MAP_TILES
+            && m.steel.len() == MAP_TILES
+            && m.coal.len() == MAP_TILES
+            && m.crystal.len() == MAP_TILES;
+        if !len_ok {
+            return false;
+        }
+        let tile_ok = |t: (u8, u8)| t.0 < MAP_SIZE as u8 && t.1 < MAP_SIZE as u8;
+        self.buildings.iter().all(|b| tile_ok(b.tile))
+            && self.units.iter().all(|u| tile_ok(u.tile))
+            && self.map.hq_tiles.iter().all(|&t| tile_ok(t))
     }
 
     pub fn remaining_value(&self, player: Player) -> i32 {

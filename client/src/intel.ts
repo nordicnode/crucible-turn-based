@@ -257,12 +257,11 @@ export class IntelLogger {
         return this.addEntry(turn, `CRITICAL: ${entity.kind} destroyed!`, "danger", "LOST");
       }
       return this.addEntry(turn, `Unit lost: ${entity.kind}`, "danger", "LOST");
-    } else {
-      if (["Hq", "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret"].includes(entity.kind)) {
-        return this.addEntry(turn, `Enemy ${entity.kind} destroyed!`, "kill", "KILL");
-      }
-      return this.addEntry(turn, `Hostile neutralized: ${entity.kind}`, "kill", "KILL");
     }
+    if (["Hq", "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory", "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret"].includes(entity.kind)) {
+      return this.addEntry(turn, `Enemy ${entity.kind} destroyed!`, "kill", "KILL");
+    }
+    return this.addEntry(turn, `Hostile neutralized: ${entity.kind}`, "kill", "KILL");
   }
 
   /**

@@ -29,6 +29,7 @@ import {
   placeBuilding,
   repair,
   sell,
+  setRally,
   startResearch,
   trainUnit,
   formatResourceCost,
@@ -44,7 +45,13 @@ import {
 } from "./types";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
-const ctx = canvas.getContext("2d")!;
+// Non-null by construction (an unreachable init bail rather than a per-frame
+// `!`); the declared non-null type keeps closures from re-narrowing to null.
+const ctx: CanvasRenderingContext2D = (() => {
+  const c = canvas.getContext("2d");
+  if (!c) throw new Error("2D canvas context unavailable");
+  return c;
+})();
 
 const net = new Net();
 const world = new World();
@@ -171,10 +178,20 @@ function onServerMsg(msg: ServerMsg): void {
           // Check for under-attack alert if friendly
           intel.processUnderAttack(msg.turn, e);
 
-          // Entity took damage: find attacking enemies in combat range
-          const attacker = [...world.entities.values()].find(
-            (other) => other.owner !== e.owner && Math.hypot(other.x - e.x, other.y - e.y) <= 6.5,
-          );
+          // Entity took damage: find the *nearest* attacking enemy in range
+          // (iteration order is not distance order), so the muzzle flash and
+          // impact line point at the actual shooter rather than an arbitrary
+          // nearby enemy.
+          let attacker: Entity | null = null;
+          let bestD = Infinity;
+          for (const other of world.entities.values()) {
+            if (other.owner === e.owner) continue;
+            const d = Math.hypot(other.x - e.x, other.y - e.y);
+            if (d <= 6.5 && d < bestD) {
+              bestD = d;
+              attacker = other;
+            }
+          }
           if (attacker) {
             const kind = attacker.kind === "Artillery" ? "artillery" : attacker.kind === "Tank" ? "shell" : attacker.kind === "Turret" ? "laser" : "bullet";
             const color = attacker.owner === 0 ? "#7899a2" : "#b86d5d";
@@ -305,6 +322,14 @@ function onServerMsg(msg: ServerMsg): void {
         "All tactical channels busy — try again in a moment.";
       break;
     }
+    default: {
+      // Every current ServerMsg variant is handled above; reaching the default
+      // is a wire-format/protocol drift and must never be silently dropped.
+      // (The union is exhaustive today, so a new variant that forgets its case
+      // fails the `msg.type` assignment here rather than vanishing.)
+      const unknown: never = msg;
+      void unknown;
+    }
   }
 }
 
@@ -404,6 +429,17 @@ function selectedUnits(): number[] {
 
 function selectedSingle(): number | null {
   return selection.size === 1 ? [...selection][0] : null;
+}
+
+/** Production building kinds that accept a rally point (mirrors the sim). */
+const PRODUCER_KINDS = new Set(["Barracks", "Factory", "Airfield"]);
+
+/** The id of the single own production building currently selected, if any. */
+function singleProducerSelected(): number | null {
+  if (selection.size !== 1) return null;
+  const e = world.entities.get([...selection][0]);
+  if (!e || e.owner !== 0 || !PRODUCER_KINDS.has(e.kind)) return null;
+  return e.id;
 }
 
 function issueMove(tile: [number, number]): void {
@@ -550,14 +586,25 @@ canvas.addEventListener("mousedown", (ev) => {
     renderCommandSidebar();
     const [tx, ty] = tileAt(sx, sy);
     // C&C right-click: an enemy under the cursor gets focus-fired by the
-    // selected combat units; open ground is an attack-move instead.
+    // selected combat units; a selected production building sets/clears its
+    // rally point on open ground; otherwise open ground is an attack-move.
     const target = enemyEntityAt(tx, ty);
     const units = selectedUnits();
     if (target && units.length > 0) {
       sendCommands([attack(units, target.id)]);
     } else {
-      issueMove([tx, ty]);
+      const producer = singleProducerSelected();
+      if (producer != null) {
+        // Right-click the producer itself to clear its rally point.
+        sendCommands([setRally(producer, [tx, ty])]);
+        lastPanelSig = "";
+        renderCommandSidebar();
+      } else {
+        issueMove([tx, ty]);
+      }
     }
+    // Right-click also clears the current selection and tile inspector.
+    clearSelection();
   }
 });
 
@@ -657,6 +704,17 @@ function selectAt(sx: number, sy: number, additive: boolean): void {
   } else if (!additive) {
     selection = new Set();
   }
+  lastPanelSig = "";
+  renderCommandSidebar();
+}
+
+/** Deselect every entity and clear the tile inspector (+ refresh UI). */
+function clearSelection(): void {
+  selection = new Set();
+  selectedTile = null;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
   lastPanelSig = "";
   renderCommandSidebar();
 }
@@ -890,19 +948,21 @@ function initToolAndTabIcons(): void {
   if (repairBtn) {
     repairBtn.addEventListener("click", () => {
       const single = selectedSingle();
-      const selEntity = single != null ? world.entities.get(single) : null;
-      if (
-        selEntity &&
-        BUILDING_KINDS.has(selEntity.kind) &&
-        selEntity.owner === 0 &&
-        selEntity.hp < selEntity.maxHp
-      ) {
-        sendCommands([repair(single!)]);
-      } else {
-        toolMode = toolMode === "repair" ? null : "repair";
-        if (toolMode) placementMode = null;
-        lastPanelSig = "";
-        renderCommandSidebar();
+      if (single != null) {
+        const selEntity = world.entities.get(single);
+        if (
+          selEntity &&
+          BUILDING_KINDS.has(selEntity.kind) &&
+          selEntity.owner === 0 &&
+          selEntity.hp < selEntity.maxHp
+        ) {
+          sendCommands([repair(single)]);
+        } else {
+          toolMode = toolMode === "repair" ? null : "repair";
+          if (toolMode) placementMode = null;
+          lastPanelSig = "";
+          renderCommandSidebar();
+        }
       }
     });
   }
@@ -911,7 +971,8 @@ function initToolAndTabIcons(): void {
   if (sellBtn) {
     sellBtn.addEventListener("click", () => {
       const single = selectedSingle();
-      const selEntity = single != null ? world.entities.get(single) : null;
+      if (single == null) return;
+      const selEntity = world.entities.get(single);
       if (
         selEntity &&
         BUILDING_KINDS.has(selEntity.kind) &&
@@ -924,7 +985,7 @@ function initToolAndTabIcons(): void {
         confirmText.textContent = `Sell ${selEntity.kind} for ~${Math.floor((BUILD_COSTS[selEntity.kind]?.ore ?? 0) * 0.5)} ore refund?`;
         confirm.classList.remove("hidden");
         el("sell-confirm-yes").onclick = () => {
-          sendCommands([sell(single!)]);
+          sendCommands([sell(single)]);
           confirm.classList.add("hidden");
         };
         el("sell-confirm-no").onclick = () => {
@@ -1057,10 +1118,16 @@ function cmdButton(
   const b = document.createElement("button");
   b.className = "cmd";
   const displayLabel = opts.label ?? key;
-  b.innerHTML = `
-    <img class="thumb" src="${thumbUrl}" alt="${key}" />
-    <span class="label">${displayLabel}</span>
-  `;
+  // Build children via DOM API (never innerHTML) so unit/building names and
+  // asset URLs can't inject markup.
+  const thumb = document.createElement("img");
+  thumb.className = "thumb";
+  thumb.alt = key;
+  thumb.src = thumbUrl;
+  const name = document.createElement("span");
+  name.className = "label";
+  name.textContent = displayLabel;
+  b.append(thumb, name);
   const costLabel = formatResourceCost(cost);
   if (costLabel) {
     const c = document.createElement("span");
@@ -1216,21 +1283,43 @@ function renderCommandSidebar(): void {
       const nextStr = nextUnits.length > 0 ? ` · NEXT: ${nextUnits.join(", ").toUpperCase()}` : "";
       const thumb = getThumbnailDataUrl(currentUnit, 0);
 
-      queue.innerHTML = `
-        <div class="civ-prod-card">
-          <div class="civ-prod-thumb-wrap">
-            <img class="civ-prod-thumb" src="${thumb}" alt="${currentUnit}" />
-            <div class="civ-prod-grey-overlay" style="height:${100 - pct}%">
-              <div class="civ-prod-scanline"></div>
-            </div>
-          </div>
-          <div class="civ-prod-info">
-            <div class="civ-prod-title">PRODUCING: ${currentUnit.toUpperCase()}</div>
-            <div class="civ-prod-sub">${turnsLeft > 0 ? `TURN ${prog + 1} OF ${total} (${turnsLeft}T LEFT)` : `READY NEXT TURN`}${nextStr}</div>
-            <div class="queue-bar"><div style="width:${pct}%"></div></div>
-          </div>
-        </div>
-      `;
+      const card = document.createElement("div");
+      card.className = "civ-prod-card";
+
+      const thumbWrap = document.createElement("div");
+      thumbWrap.className = "civ-prod-thumb-wrap";
+      const img = document.createElement("img");
+      img.className = "civ-prod-thumb";
+      img.src = thumb;
+      img.alt = currentUnit;
+      const overlay = document.createElement("div");
+      overlay.className = "civ-prod-grey-overlay";
+      overlay.style.height = `${100 - pct}%`;
+      const scanline = document.createElement("div");
+      scanline.className = "civ-prod-scanline";
+      overlay.appendChild(scanline);
+      thumbWrap.append(img, overlay);
+
+      const info = document.createElement("div");
+      info.className = "civ-prod-info";
+      const title = document.createElement("div");
+      title.className = "civ-prod-title";
+      title.textContent = `PRODUCING: ${currentUnit.toUpperCase()}`;
+      const sub = document.createElement("div");
+      sub.className = "civ-prod-sub";
+      sub.textContent =
+        turnsLeft > 0
+          ? `TURN ${prog + 1} OF ${total} (${turnsLeft}T LEFT)`
+          : `READY NEXT TURN`;
+      if (nextStr) sub.textContent += nextStr;
+      const bar = document.createElement("div");
+      bar.className = "queue-bar";
+      const barFill = document.createElement("div");
+      barFill.style.width = `${pct}%`;
+      bar.appendChild(barFill);
+      info.append(title, sub, bar);
+      card.append(thumbWrap, info);
+      queue.replaceChildren(card);
     } else {
       queue.classList.add("hidden");
     }
@@ -1564,15 +1653,16 @@ function renderResearch(): void {
   const tiers = new Map<number, TechId[]>();
   for (const id of TECH_ORDER) {
     const t = techTier(id);
-    if (!tiers.has(t)) tiers.set(t, []);
-    tiers.get(t)!.push(id);
+    const bucket = tiers.get(t);
+    if (bucket) bucket.push(id);
+    else tiers.set(t, [id]);
   }
-  const tierKeys = [...tiers.keys()].sort((a, b) => a - b);
-  for (const tier of tierKeys) {
+  const sortedTiers = [...tiers.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [tier, ids] of sortedTiers) {
     const row = document.createElement("div");
     row.className = "research-row";
     row.dataset.tier = String(tier);
-    for (const id of tiers.get(tier)!) {
+    for (const id of ids) {
       row.appendChild(researchCard(id, canStart));
     }
     tree.appendChild(row);
@@ -1592,14 +1682,22 @@ function researchCard(id: TechId, canStart: boolean): HTMLElement {
   const card = document.createElement("button");
   card.className = "research-card" + (done ? " done" : "") + (active ? " active" : "");
   card.type = "button";
-  card.innerHTML = `
-    <div class="research-name">${info.name}</div>
-    <div class="research-desc">${info.description}</div>
-    <div class="research-cost">
-      ${info.researchCost} pts${info.crystalCost > 0 ? ` · ${info.crystalCost} crystal` : ""}
-      ${active ? ` · ${Math.min(100, Math.round((r.points / info.researchCost) * 100))}%` : ""}
-    </div>
-  `;
+  // Build children via DOM API (never innerHTML) so tech names/descriptions
+  // can't inject markup.
+  const nameEl = document.createElement("div");
+  nameEl.className = "research-name";
+  nameEl.textContent = info.name;
+  const descEl = document.createElement("div");
+  descEl.className = "research-desc";
+  descEl.textContent = info.description;
+  const costEl = document.createElement("div");
+  costEl.className = "research-cost";
+  costEl.textContent = `${info.researchCost} pts`;
+  if (info.crystalCost > 0) costEl.textContent += ` · ${info.crystalCost} crystal`;
+  if (active) {
+    costEl.textContent += ` · ${Math.min(100, Math.round((r.points / info.researchCost) * 100))}%`;
+  }
+  card.append(nameEl, descEl, costEl);
   if (active) card.classList.add("progress");
   if (disabled) {
     card.disabled = true;
@@ -1887,10 +1985,13 @@ resize();
  *  patches, so the lobby shows off the real biome tiles. Cosmetic only —
  *  live matches always use the server's authoritative generator. */
 function generateDemoTerrain(seed: number): { terrain: string[]; passable: boolean[] } {
-  const terrain: string[] = new Array(MAP_TILES).fill("Plains");
-  const passable: boolean[] = new Array(MAP_TILES).fill(true);
+  const terrain: string[] = Array.from({ length: MAP_TILES }, () => "Plains");
+  const passable: boolean[] = Array.from({ length: MAP_TILES }, () => true);
+  // Deterministic integer demo-terrain hash. All constants must be Number-safe
+  // (< 2^53): the original 64-bit prime overflows JS Numbers and loses the
+  // intended avalanche. Keep them small and exact.
   const hash = (x: number, y: number, salt: number): number => {
-    let z = (x * 374761393 + y * 668265263 + salt * 1442695040888963407) ^ (seed >>> 0);
+    let z = ((x * 2654435761 + y * 40503 + salt * 74996233) ^ (seed >>> 0)) >>> 0;
     z = (z ^ (z >> 13)) * 1274126143;
     return (z ^ (z >> 16)) >>> 0;
   };
@@ -2110,7 +2211,12 @@ async function initOpponentPicker(): Promise<void> {
     }
 
     museumRow.innerHTML = "";
-    const bosses = museum.champions.filter((c) => !c.reigning).reverse().slice(0, 6);
+    const nonReigning = museum.champions.filter((c) => !c.reigning);
+    // Last 6 dethroned champions, most-recent first (no mutating `.reverse()`).
+    const bosses: { genome_id: number; generation: number }[] = [];
+    for (let i = nonReigning.length - 1; i >= 0 && bosses.length < 6; i--) {
+      bosses.push(nonReigning[i]);
+    }
     if (bosses.length > 0) {
       const label = document.createElement("span");
       label.className = "muted";
@@ -2137,7 +2243,11 @@ async function initOpponentPicker(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 document.querySelectorAll<HTMLButtonElement>("[data-opp]").forEach((btn) => {
-  btn.addEventListener("click", () => startMatch(btn.dataset.opp!, btn.dataset.label));
+  const opp = btn.dataset.opp;
+  if (opp != null) {
+    const label = btn.dataset.label ?? opp;
+    btn.addEventListener("click", () => startMatch(opp, label));
+  }
 });
 initDashboard();
 initTileInspector();

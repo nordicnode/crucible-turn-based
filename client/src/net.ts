@@ -8,7 +8,11 @@ export class Net {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly HEARTBEAT_MS = 30000;
-  private static readonly TIMEOUT_MS = 90000;
+  // Above the server's idle-reap window (600s) so the client never falsely
+  // declares a healthy-but-idle connection dead before the server abandons it
+  // (server close then surfaces via `onclose`). Backup only for connections
+  // that neither deliver messages nor close.
+  private static readonly TIMEOUT_MS = 660000;
 
   connect(onMessage: (msg: ServerMsg) => void, onClose: () => void): void {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -29,7 +33,7 @@ export class Net {
       // doesn't respond within TIMEOUT_MS, treat the connection as dead.
       this.heartbeatTimer = setInterval(() => {
         if (this.ws === ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({ type: "ping" } as unknown as ClientMsg));
+          this.ws.send(JSON.stringify({ type: "ping" } satisfies ClientMsg));
           this.timeoutTimer ??= setTimeout(() => notifyClosed(), Net.TIMEOUT_MS);
         }
       }, Net.HEARTBEAT_MS);
@@ -64,6 +68,9 @@ export class Net {
   close(): void {
     const ws = this.ws;
     this.ws = null;
+    // Drop any commands queued for the old connection so they don't replay
+    // into a freshly-joined match after a reconnect.
+    this.queue = [];
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;

@@ -23,6 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+rayon = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

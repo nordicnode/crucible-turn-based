@@ -21,11 +21,14 @@ import {
 } from "./sprites";
 import { BUILDING_KINDS, BUILD_COSTS, MAP_SIZE, resourceBundleAffordable } from "./types";
 import type { Entity } from "./world";
-import { World } from "./world";
+import type { World } from "./world";
 
 export const MAP = MAP_SIZE;
 export const ZOOM_MIN = 4;
 export const ZOOM_MAX = 96;
+
+/// Production building kinds that accept a rally point.
+const PRODUCER_KINDS = new Set(["Barracks", "Factory", "Airfield"]);
 
 export class Camera {
   cx = 32; // World coordinate at top-left of viewport
@@ -162,7 +165,6 @@ export interface RenderOptions {
   selectedTile?: [number, number] | null;
   placementMode?: string | null;
   placementCursor?: [number, number] | null;
-  drawMinimap?: boolean;
   /** Tile under the mouse; when set and a single friendly unit is selected,
    *  a movement-cost path preview is drawn (U4). */
   hoverTile?: [number, number] | null;
@@ -234,6 +236,10 @@ export class Renderer {
           if (t0 !== undefined) {
             revealAlpha = Math.min(1, (performance.now() - t0) / 300);
           }
+        } else {
+          // Prune fade timestamps for tiles that have left the visible set,
+          // so the map doesn't accumulate an entry per tile ever revealed.
+          this.revealStart.delete(idx);
         }
 
         // Typed terrain (biomes, rivers, lakes, mountains): passability and
@@ -247,12 +253,12 @@ export class Renderer {
           this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, false);
           drawTerrainTopology(ctx, world, tx, ty, px, py, size, terrain ?? (isPassable ? "Plains" : "Mountain"));
           ctx.restore();
-        } else if (!isVis) {
-          // Explored-but-not-visible: dark silhouette of the real terrain.
-          this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, true);
-        } else {
+        } else if (isVis) {
           this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, false);
           drawTerrainTopology(ctx, world, tx, ty, px, py, size, terrain ?? (isPassable ? "Plains" : "Mountain"));
+        } else {
+          // Explored-but-not-visible: dark silhouette of the real terrain.
+          this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, true);
         }
       }
     }
@@ -316,17 +322,16 @@ export class Renderer {
     // than one unit.
     this.drawStackingBadges(ctx, drawList, w, h);
 
+    // 7d. Production rally points: a dashed line + marker from each own
+    // producer to where its newly-trained units will march.
+    this.drawRallyPoints(ctx, world, w, h);
+
     // 8. Air Layer FX: Projectiles, lasers, explosions, particles
     fx.drawAirLayer(ctx, cam, w, h);
 
     // 9. Building placement ghost
     if (opts.placementMode && opts.placementCursor) {
       this.drawPlacementGhost(ctx, opts.placementMode, opts.placementCursor, world);
-    }
-
-    // 10. Optional on-canvas Minimap
-    if (opts.drawMinimap) {
-      this.drawMinimap(ctx, world, selection, w, h);
     }
   }
 
@@ -392,6 +397,48 @@ export class Renderer {
       ctx.fillText(label, bx + 3, by);
       ctx.restore();
       void key;
+    }
+  }
+
+  /** Draw production rally points: a dashed line from each own producer to
+   *  its rally tile, with a marker at the destination, so the player sees
+   *  where newly-trained units will march. */
+  private drawRallyPoints(
+    ctx: CanvasRenderingContext2D,
+    world: World,
+    w: number,
+    h: number,
+  ): void {
+    const cam = this.camera;
+    const z = cam.zoom;
+    for (const b of world.entities.values()) {
+      if (b.owner !== 0 || !PRODUCER_KINDS.has(b.kind)) continue;
+      const rally = b.rally;
+      if (!rally) continue;
+      const px = cam.screenX(b.x);
+      const py = cam.screenY(b.y);
+      const rx = cam.screenX(rally[0] + 0.5);
+      const ry = cam.screenY(rally[1] + 0.5);
+      // Cull both endpoints off-screen to skip a wasted line draw.
+      if (px < -z * 4 || py < -z * 4 || px > w + z * 4 || py > h + z * 4) continue;
+      ctx.save();
+      ctx.strokeStyle = "rgba(231, 202, 138, 0.55)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(rx, ry);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const r = Math.max(3, Math.floor(z * 0.18));
+      ctx.fillStyle = "rgba(231, 202, 138, 0.92)";
+      ctx.beginPath();
+      ctx.arc(rx, ry, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(8, 10, 12, 0.85)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -552,6 +599,10 @@ export class Renderer {
     to: [number, number],
   ): [number, number][] | null {
     if (from[0] === to[0] && from[1] === to[1]) return [];
+    const cached = Renderer.pathCache.get(
+      `${world.revision}|${from[0]},${from[1]}>${to[0]},${to[1]}`,
+    );
+    if (cached !== undefined) return cached;
     const w = MAP;
     const h = MAP;
     const idx = (x: number, y: number) => y * w + x;
@@ -573,7 +624,6 @@ export class Renderer {
     };
     const g = new Map<number, number>();
     const came = new Map<number, number>();
-    const open = new Map<number, number>(); // idx -> f
     const startIdx = idx(from[0], from[1]);
     const goalIdx = idx(to[0], to[1]);
     const heuristic = (i: number): number => {
@@ -581,24 +631,59 @@ export class Renderer {
       const y = Math.floor(i / w);
       return Math.max(Math.abs(x - to[0]), Math.abs(y - to[1]));
     };
-    g.set(startIdx, 0);
-    open.set(startIdx, heuristic(startIdx));
-    let guard = 0;
-    while (open.size > 0 && guard < 40_000) {
-      guard += 1;
-      let bestIdx = -1;
-      let bestF = Infinity;
-      for (const [i, f] of open) {
-        if (f < bestF) {
-          bestF = f;
-          bestIdx = i;
+    // Binary min-heap over (idx, f) so each pop is O(log V) instead of an
+    // O(V) linear scan of an open-set map. Reachability hangs (hovering an
+    // isolated island/lake) would otherwise cost ~40k * ~16k steps per frame.
+    const heapIdx: number[] = [];
+    const heapF: number[] = [];
+    const heapPush = (i: number, f: number) => {
+      heapIdx.push(i);
+      heapF.push(f);
+      let c = heapF.length - 1;
+      while (c > 0) {
+        const p = (c - 1) >> 1;
+        if (heapF[p] <= heapF[c]) break;
+        [heapF[p], heapF[c]] = [heapF[c], heapF[p]];
+        [heapIdx[p], heapIdx[c]] = [heapIdx[c], heapIdx[p]];
+        c = p;
+      }
+    };
+    const heapPop = (): number => {
+      const top = heapIdx[0];
+      const lastIdx = heapIdx[heapIdx.length - 1];
+      heapIdx.pop();
+      heapF.pop();
+      if (heapF.length > 0) {
+        heapIdx[0] = lastIdx;
+        let p = 0;
+        for (;;) {
+          const l = p * 2 + 1;
+          const r = l + 1;
+          let s = p;
+          if (l < heapF.length && heapF[l] < heapF[s]) s = l;
+          if (r < heapF.length && heapF[r] < heapF[s]) s = r;
+          if (s === p) break;
+          [heapF[p], heapF[s]] = [heapF[s], heapF[p]];
+          [heapIdx[p], heapIdx[s]] = [heapIdx[s], heapIdx[p]];
+          p = s;
         }
       }
+      return top;
+    };
+    g.set(startIdx, 0);
+    heapPush(startIdx, heuristic(startIdx));
+    const closed = new Set<number>();
+    let guard = 0;
+    while (heapF.length > 0 && guard < 500_000) {
+      guard += 1;
+      const bestIdx = heapPop();
       if (bestIdx === goalIdx) break;
-      open.delete(bestIdx);
+      if (closed.has(bestIdx)) continue;
+      closed.add(bestIdx);
       const bx = bestIdx % w;
       const by = Math.floor(bestIdx / w);
-      const gBest = g.get(bestIdx)!;
+      const gBest = g.get(bestIdx);
+      if (gBest === undefined) continue;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
         const nx = bx + dx;
         const ny = by + dy;
@@ -610,21 +695,40 @@ export class Renderer {
         if (known !== undefined && known <= ng) continue;
         g.set(ni, ng);
         came.set(ni, bestIdx);
-        open.set(ni, ng + heuristic(ni));
+        heapPush(ni, ng + heuristic(ni));
       }
     }
-    if (!came.has(goalIdx)) return null;
-    const path: [number, number][] = [];
-    let cur = goalIdx;
-    while (cur !== startIdx) {
-      const prev = came.get(cur);
-      if (prev === undefined) break;
-      path.push([cur % w, Math.floor(cur / w)]);
-      cur = prev;
+    const result: [number, number][] | null = came.has(goalIdx)
+      ? (() => {
+          const path: [number, number][] = [];
+          let cur = goalIdx;
+          while (cur !== startIdx) {
+            const prev = came.get(cur);
+            if (prev === undefined) break;
+            // prepend so the result is start→goal without a mutating
+            // `.reverse()`
+            path.unshift([cur % w, Math.floor(cur / w)]);
+            cur = prev;
+          }
+          return path;
+        })()
+      : null;
+    Renderer.pathCache.set(
+      `${world.revision}|${from[0]},${from[1]}>${to[0]},${to[1]}`,
+      result,
+    );
+    if (Renderer.pathCache.size > 4096) {
+      // Revisions and map seeds accumulate over a session; drop the oldest
+      // entries once the cache passes a modest bound.
+      const keys = [...Renderer.pathCache.keys()];
+      for (const k of keys.slice(0, 512)) Renderer.pathCache.delete(k);
     }
-    path.reverse();
-    return path;
+    return result;
   }
+  /** Path-preview cache, invalidated by `World.revision` (bumped on every
+   *  diff), so a hovered route isn't recomputed every animation frame and an
+   *  unreachable hover is remembered until the world changes. Bounded. */
+  private static pathCache = new Map<string, [number, number][] | null>();
 
   /** Draw the movement path preview for a single selected unit (U4). */
   private drawPathPreview(
@@ -651,17 +755,19 @@ export class Renderer {
     for (const [px, py] of [from, ...path]) {
       const sx = cam.screenX(px + 0.5);
       const sy = cam.screenY(py + 0.5);
-      if (!started) {
+      if (started) {
+        ctx.lineTo(sx, sy);
+      } else {
         ctx.moveTo(sx, sy);
         started = true;
-      } else {
-        ctx.lineTo(sx, sy);
       }
     }
     ctx.stroke();
     ctx.setLineDash([]);
-    // Cost readout at the end of the route.
-    const total = Renderer.pathCost(world, path);
+    // Cost readout at the end of the route. Include the starting tile and
+    // weight diagonal steps the same way the A* search does, so the label
+    // matches the path's actual computed cost.
+    const total = Renderer.pathCost(world, [from, ...path]);
     const end = path[path.length - 1] ?? from;
     const ex = cam.screenX(end[0] + 0.5);
     const ey = cam.screenY(end[1] + 0.5);
@@ -677,12 +783,22 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** Movement-point cost of a path from `from` (used by the preview). */
+  /** Movement-point cost of a path (used by the preview). Weights diagonal
+   *  steps ×1.4 exactly as the A* search does, so the shown MP matches the
+   *  path's computed cost instead of understating routes that step diagonally. */
   static pathCost(world: World, path: [number, number][]): number {
     let total = 0;
+    let prev: [number, number] | null = null;
     for (const tile of path) {
       const rule = world.terrainRules.get(world.terrain[tile[1] * MAP + tile[0]]);
-      total += rule ? Math.max(1, rule.moveMultiplier) : 1;
+      let step = rule ? Math.max(1, rule.moveMultiplier) : 1;
+      if (prev) {
+        const dx = Math.abs(tile[0] - prev[0]);
+        const dy = Math.abs(tile[1] - prev[1]);
+        if (dx !== 0 && dy !== 0) step *= 1.4;
+      }
+      total += step;
+      prev = tile;
     }
     return Math.round(total * 10) / 10;
   }
@@ -727,62 +843,6 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
-  }
-
-  drawMinimap(
-    ctx: CanvasRenderingContext2D,
-    world: World,
-    selection: Set<number>,
-    w: number,
-    h: number,
-  ): void {
-    const s = 3.5;
-    const ox = 12;
-    const oy = h - MAP * s - 12;
-
-    ctx.fillStyle = "rgba(10, 14, 18, 0.92)";
-    ctx.fillRect(ox - 3, oy - 3, MAP * s + 6, MAP * s + 6);
-    ctx.strokeStyle = "#334155";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(ox - 3, oy - 3, MAP * s + 6, MAP * s + 6);
-
-    for (let ty = 0; ty < MAP; ty++) {
-      for (let tx = 0; tx < MAP; tx++) {
-        const idx = ty * MAP + tx;
-        const terrain = world.terrain[idx] ?? (world.passable[idx] ? "Plains" : "Mountain");
-        if (world.visible.has(idx)) {
-          ctx.fillStyle = terrainRadarColor(terrain);
-        } else if (world.explored.has(idx)) {
-          ctx.fillStyle = world.passable[idx] ? "#172119" : "#1b2022";
-        } else {
-          continue;
-        }
-        ctx.fillRect(ox + tx * s, oy + ty * s, s, s);
-      }
-    }
-
-    for (const t of world.resourceTiles.values()) {
-      if (t.infinite !== true && t.amount <= 0) continue;
-      ctx.fillStyle = resourceColor(t.resource);
-      ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
-    }
-
-    for (const e of world.entities.values()) {
-      const isSel = selection.has(e.id);
-      ctx.fillStyle = isSel ? COLORS.selected : e.owner === 0 ? COLORS.own : COLORS.enemy;
-      const dotSize = isUnit(e) ? 2 : 3;
-      ctx.fillRect(ox + Math.floor(e.x * s) - 1, oy + Math.floor(e.y * s) - 1, dotSize, dotSize);
-    }
-
-    // Accurate Viewport Box
-    const vr = cameraViewRect(this.camera, w, h);
-    if (vr) {
-      ctx.strokeStyle = "rgba(255, 226, 122, 0.85)";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(ox + vr.x * s, oy + vr.y * s, vr.w * s, vr.h * s);
-      ctx.fillStyle = "rgba(255, 226, 122, 0.1)";
-      ctx.fillRect(ox + vr.x * s, oy + vr.y * s, vr.w * s, vr.h * s);
-    }
   }
 
   minimapToWorld(sx: number, sy: number, _w: number, h: number): [number, number] | null {
@@ -860,8 +920,10 @@ export function drawRadar(
     ctx.stroke();
   }
 
-  // 4. Accurate Camera Viewport Box
-  const vr = cameraViewRect(camera, window.innerWidth, window.innerHeight);
+  // 4. Accurate Camera Viewport Box. Use the camera's own viewport (the
+  // inset battlefield canvas, set on every frame) rather than the window
+  // dims — the radar is sized to the battle view, not the OS window.
+  const vr = cameraViewRect(camera, camera.viewportW, camera.viewportH);
   if (vr) {
     ctx.strokeStyle = "rgba(255, 226, 122, 0.9)";
     ctx.lineWidth = 1.5;
@@ -1060,11 +1122,13 @@ export function isBuildingPlacable(
     }
   }
 
+  const oreTile = world.oreTiles.get(`${tx},${ty}`);
+  const cryTile = world.crystalTiles.get(`${tx},${ty}`);
   const resource = world.resourceTiles.get(`${tx},${ty}`)
-    ?? (world.oreTiles.get(`${tx},${ty}`)
-      ? { resource: "Ore" as const, amount: world.oreTiles.get(`${tx},${ty}`)!.amount, infinite: true }
-      : world.crystalTiles.get(`${tx},${ty}`)
-        ? { resource: "Crystal" as const, amount: world.crystalTiles.get(`${tx},${ty}`)!.amount, infinite: true }
+    ?? (oreTile
+      ? { resource: "Ore" as const, amount: oreTile.amount, infinite: true }
+      : cryTile
+        ? { resource: "Crystal" as const, amount: cryTile.amount, infinite: true }
         : null);
   const hasResource = resource != null && (resource.infinite === true || resource.amount > 0);
 
@@ -1075,8 +1139,11 @@ export function isBuildingPlacable(
     if (!hasResource) return false;
   } else if (hasResource) {
     return false;
-  } else {
-    // Check distance to nearest own building (within 5 tiles Euclidean)
+  }
+
+  // Non-refinery buildings on a normal tile must sit near an own building
+  // (within 5 tiles Euclidean).
+  if (btype !== "Refinery" && btype !== "CrystalRefinery") {
     const PLACE_RADIUS_SQ = 25; // 5^2
     let nearOwn = false;
     for (const b of world.ownBuildings) {

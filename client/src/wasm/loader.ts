@@ -4,13 +4,7 @@
 // This module is imported lazily so the main bundle never pulls the wasm in
 // until spectate/replay is actually used.
 
-import init, {
-  replay_frame,
-  replay_meta,
-  replay_result,
-  replay_snapshot_json,
-  sim_version,
-} from "./crucible_client_wasm";
+import init, { replay_frame, replay_meta } from "./crucible_client_wasm";
 import wasmUrl from "./crucible_client_wasm_bg.wasm?url";
 
 import type { ReplayFrame, ReplayMeta } from "../snapshot";
@@ -25,30 +19,22 @@ export function wasmInit(): Promise<unknown> {
 
 export async function meta(replayJson: string): Promise<ReplayMeta> {
   await wasmInit();
-  return JSON.parse(replay_meta(replayJson)) as ReplayMeta;
+  const raw = replay_meta(replayJson);
+  try {
+    return JSON.parse(raw) as ReplayMeta;
+  } catch (err) {
+    // Surface a clear error for a corrupt/legacy replay; the caller (spectate)
+    // catches this and degrades to an error card instead of crashing the page.
+    throw new Error(`invalid replay metadata: ${err}`);
+  }
 }
 
 export async function frame(replayJson: string, turn: number): Promise<ReplayFrame> {
   await wasmInit();
-  return JSON.parse(replay_frame(replayJson, turn)) as ReplayFrame;
-}
-
-export async function result(replayJson: string): Promise<{
-  reason: string | null;
-  duration_turns: number;
-  duration_rounds?: number;
-  hash: number;
-}> {
-  await wasmInit();
-  return JSON.parse(replay_result(replayJson));
-}
-
-export async function snapshotJson(replayJson: string, turn: number): Promise<unknown> {
-  await wasmInit();
-  return JSON.parse(replay_snapshot_json(replayJson, turn)) as unknown;
-}
-
-export async function version(): Promise<string> {
-  await wasmInit();
-  return sim_version();
+  const raw = replay_frame(replayJson, turn);
+  try {
+    return JSON.parse(raw) as ReplayFrame;
+  } catch (err) {
+    throw new Error(`invalid replay frame (turn ${turn}): ${err}`);
+  }
 }

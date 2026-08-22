@@ -37,6 +37,9 @@ pub(crate) struct AppState {
     pub(crate) diagnostics: Arc<tokio::sync::Semaphore>,
     /// Caps concurrent live matches for the same reason.
     pub(crate) live_matches: Arc<tokio::sync::Semaphore>,
+    /// When set (via `CRUCIBLE_ADMIN_TOKEN`), mutating diagnostic endpoints
+    /// require `Authorization: Bearer <token>`. Unset = open (local dev).
+    pub(crate) admin_token: Option<String>,
     pub(crate) started_at: std::time::Instant,
 }
 
@@ -214,6 +217,9 @@ async fn main() {
         trainer: trainer_shared,
         diagnostics: Arc::new(tokio::sync::Semaphore::new(1)),
         live_matches: Arc::new(tokio::sync::Semaphore::new(MAX_LIVE_MATCHES)),
+        admin_token: std::env::var("CRUCIBLE_ADMIN_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty()),
         started_at: std::time::Instant::now(),
     };
 

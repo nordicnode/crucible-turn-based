@@ -99,6 +99,59 @@ fn strategic_map_invariants_over_10k_seeds() {
     assert!(saw_asymmetry, "generator unexpectedly remained mirrored");
 }
 
+/// The player-facing opening contract: ore sits at (or just beyond) the edge
+/// of the HQ's opening sightline, steel and coal are within a short scout,
+/// and the home view is never a blank plains pad — it always contains a mix
+/// of terrain. This pins the "interesting, resource-rich spawn" guarantee.
+#[test]
+fn opening_resources_are_close_and_terrain_is_varied() {
+    use crucible_sim::entity::ResourceType;
+    for seed in 0..3000u64 {
+        let map = Map::generate(seed);
+        for &hq in &map.hq_tiles {
+            let mut ore_d = i32::MAX;
+            let mut steel_d = i32::MAX;
+            let mut coal_d = i32::MAX;
+            let mut kinds = [false; 8];
+            for idx in 0..MAP_TILES {
+                let t = crucible_sim::map::tile_coords(idx);
+                let d = crucible_sim::tiles::chebyshev(hq.0, hq.1, t.0, t.1);
+                if d <= 7 {
+                    kinds[match map.terrain[idx] {
+                        crucible_sim::map::Terrain::Plains => 0,
+                        crucible_sim::map::Terrain::Forest => 1,
+                        crucible_sim::map::Terrain::Hills => 2,
+                        crucible_sim::map::Terrain::Desert => 3,
+                        crucible_sim::map::Terrain::Swamp => 4,
+                        crucible_sim::map::Terrain::Water => 5,
+                        crucible_sim::map::Terrain::River => 6,
+                        crucible_sim::map::Terrain::Mountain => 7,
+                    }] = true;
+                }
+                match map.resource_at(t.0, t.1) {
+                    Some(ResourceType::Ore) => ore_d = ore_d.min(d),
+                    Some(ResourceType::Steel) => steel_d = steel_d.min(d),
+                    Some(ResourceType::Coal) => coal_d = coal_d.min(d),
+                    _ => {}
+                }
+            }
+            assert!(ore_d <= 10, "seed {seed} hq {hq:?}: ore {ore_d} tiles out");
+            assert!(
+                steel_d <= 16,
+                "seed {seed} hq {hq:?}: steel {steel_d} tiles out"
+            );
+            assert!(
+                coal_d <= 16,
+                "seed {seed} hq {hq:?}: coal {coal_d} tiles out"
+            );
+            assert!(
+                kinds.iter().filter(|&&k| k).count() >= 2,
+                "seed {seed} hq {hq:?}: home view is single-terrain"
+            );
+        }
+    }
+}
+
 /// Every generated map must let either player put a Refinery down on turn 1:
 /// there is always an ore tile near spawn with a free, passable, unpaid-for
 /// neighbor inside the build radius. This is the player-facing guarantee that

@@ -119,6 +119,13 @@ impl Ghost {
                 building: at_own(building)?,
                 utype: *utype,
             }),
+            SetRally {
+                building, waypoint, ..
+            } => Some(SetRally {
+                player,
+                building: at_own(building)?,
+                waypoint: *waypoint,
+            }),
             MoveGroup {
                 units, waypoint, ..
             } => {

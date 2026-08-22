@@ -776,6 +776,24 @@ fn try_generate(seed: u64) -> Option<Map> {
         &moisture,
         &temperature,
     );
+    // A few small groves in the 4-tile band around spawn so the opening view
+    // is never a blank pad — the base clearing itself stays open plains.
+    paint_home_groves(
+        &mut terrain,
+        &mut passable,
+        hq0,
+        seed ^ 0x3C3C_3C3C,
+        &moisture,
+        &temperature,
+    );
+    paint_home_groves(
+        &mut terrain,
+        &mut passable,
+        hq1,
+        seed ^ 0xC3C3_C3C3,
+        &moisture,
+        &temperature,
+    );
 
     // Resource sites are selected from a scored candidate field. Each site is
     // a compact five-tile deposit with an intentional role in the theatre.
@@ -784,6 +802,10 @@ fn try_generate(seed: u64) -> Option<Map> {
     for (resource, zone, own, enemy, amount) in [
         (ResourceType::Ore, SiteZone::Local, hq0, hq1, 1300),
         (ResourceType::Ore, SiteZone::Local, hq1, hq0, 1300),
+        (ResourceType::Steel, SiteZone::Local, hq0, hq1, 1100),
+        (ResourceType::Steel, SiteZone::Local, hq1, hq0, 1100),
+        (ResourceType::Coal, SiteZone::Local, hq0, hq1, 1100),
+        (ResourceType::Coal, SiteZone::Local, hq1, hq0, 1100),
         (ResourceType::Ore, SiteZone::Secondary, hq0, hq1, 1900),
         (ResourceType::Ore, SiteZone::Secondary, hq1, hq0, 1900),
         (ResourceType::Steel, SiteZone::Secondary, hq0, hq1, 1500),
@@ -792,6 +814,8 @@ fn try_generate(seed: u64) -> Option<Map> {
         (ResourceType::Coal, SiteZone::Secondary, hq1, hq0, 1500),
         (ResourceType::Steel, SiteZone::Contested, hq0, hq1, 1800),
         (ResourceType::Coal, SiteZone::Contested, hq1, hq0, 1800),
+        (ResourceType::Crystal, SiteZone::Contested, hq0, hq1, 900),
+        (ResourceType::Crystal, SiteZone::Contested, hq1, hq0, 900),
         (ResourceType::Crystal, SiteZone::Strategic, hq0, hq1, 600),
         (ResourceType::Crystal, SiteZone::Strategic, hq1, hq0, 600),
     ] {
@@ -831,13 +855,30 @@ fn try_generate(seed: u64) -> Option<Map> {
         hq_tiles: [hq0, hq1],
     };
 
-    (placed >= 10 && modern_map_quality(&map) && has_opening_resources(&map)).then_some(map)
+    (placed >= 15 && modern_map_quality(&map) && has_opening_resources(&map)).then_some(map)
 }
 
 /// Guaranteed-valid open fallback. It still uses the scored resource placer so
 /// tests, editor previews, and a pathological generation seed see the same
 /// resource semantics as a normal match.
 fn open_map(seed: u64) -> Map {
+    // Retry with successive seeds until the opening-resource guarantee holds,
+    // mirroring `try_generate`'s self-healing loop. The fallback therefore can
+    // never hand out an ore/steel/coal-starved spawn even if a deterministic
+    // deposit collision drops a Local site on one attempt.
+    for attempt in 0..MAX_GEN_ATTEMPTS {
+        let heal = attempt == MAX_GEN_ATTEMPTS - 1;
+        let map = build_open_map(seed.wrapping_add(attempt), heal);
+        if has_opening_resources(&map) {
+            return map;
+        }
+    }
+    // Unreachable in practice: the `heal` pass force-stamps every resource
+    // type into Local range, so the gate above always passes; belt-and-braces.
+    build_open_map(seed, true)
+}
+
+fn build_open_map(seed: u64, heal: bool) -> Map {
     let mut rng = Rng::from_seed(seed ^ 0xD1B5_4A32_9C77_0E11);
     let diagonal = rng.below(2) == 0;
     let hq0 = if diagonal {
@@ -895,6 +936,10 @@ fn open_map(seed: u64) -> Map {
     let sites = [
         (ResourceType::Ore, SiteZone::Local, hq0, hq1, 1300),
         (ResourceType::Ore, SiteZone::Local, hq1, hq0, 1300),
+        (ResourceType::Steel, SiteZone::Local, hq0, hq1, 1100),
+        (ResourceType::Steel, SiteZone::Local, hq1, hq0, 1100),
+        (ResourceType::Coal, SiteZone::Local, hq0, hq1, 1100),
+        (ResourceType::Coal, SiteZone::Local, hq1, hq0, 1100),
         (ResourceType::Steel, SiteZone::Secondary, hq0, hq1, 1500),
         (ResourceType::Steel, SiteZone::Secondary, hq1, hq0, 1500),
         (ResourceType::Coal, SiteZone::Contested, hq0, hq1, 1500),
@@ -918,6 +963,83 @@ fn open_map(seed: u64) -> Map {
             enemy,
             amount,
         );
+    }
+    // Guarantee crystal presence: Strategic deposits can fail to place when
+    // the two fallback HQ pads sit mid-range apart (the zone requires both own
+    // and enemy distance >= scaled(20)=40), which would silently starve the
+    // map of crystal. Top up with a Local deposit so the resource-complete
+    // contract always holds, matching `try_generate`'s `modern_map_quality`.
+    if crystal.iter().all(|&amount| amount <= 0) {
+        let _ = place_deposit_site(
+            &mut terrain,
+            &mut passable,
+            &mut ore,
+            &mut steel,
+            &mut coal,
+            &mut crystal,
+            &mut centers,
+            seed ^ 0xAAA5_555A,
+            ResourceType::Crystal,
+            SiteZone::Local,
+            hq0,
+            hq1,
+            700,
+        );
+    }
+    // heal: on the final retry, force any resource type that still failed to
+    // place — or landed past its opening range — into Local range of each HQ,
+    // so the guaranteed-valid fallback can never be resource-starved.
+    if heal {
+        for (kind, near, own, enemy, s) in [
+            (ResourceType::Ore, scaled(5), hq0, hq1, seed ^ 0xE9A1_0001),
+            (ResourceType::Ore, scaled(5), hq1, hq0, seed ^ 0xE9A1_0002),
+            (ResourceType::Steel, scaled(8), hq0, hq1, seed ^ 0xE9A1_0003),
+            (ResourceType::Steel, scaled(8), hq1, hq0, seed ^ 0xE9A1_0004),
+            (ResourceType::Coal, scaled(8), hq0, hq1, seed ^ 0xE9A1_0005),
+            (ResourceType::Coal, scaled(8), hq1, hq0, seed ^ 0xE9A1_0006),
+            (
+                ResourceType::Crystal,
+                scaled(8),
+                hq0,
+                hq1,
+                seed ^ 0xE9A1_0007,
+            ),
+            (
+                ResourceType::Crystal,
+                scaled(8),
+                hq1,
+                hq0,
+                seed ^ 0xE9A1_0008,
+            ),
+        ] {
+            let has = (0..MAP_TILES).any(|idx| {
+                let t = tile_coords(idx);
+                let amount = match kind {
+                    ResourceType::Ore => ore[idx],
+                    ResourceType::Steel => steel[idx],
+                    ResourceType::Coal => coal[idx],
+                    ResourceType::Crystal => crystal[idx],
+                };
+                amount > 0 && chebyshev_distance(t, own) <= near
+            });
+            if !has {
+                let _ = place_deposit_site(
+                    &mut terrain,
+                    &mut passable,
+                    &mut ore,
+                    &mut steel,
+                    &mut coal,
+                    &mut crystal,
+                    &mut centers,
+                    s,
+                    kind,
+                    SiteZone::Local,
+                    own,
+                    enemy,
+                    700,
+                );
+            }
+        }
     }
     let (resource_kind, richness) = build_resource_metadata(&ore, &steel, &coal, &crystal);
     Map {
@@ -963,22 +1085,94 @@ fn paint_mountain_chain(terrain: &mut [Terrain], passable: &mut [bool], rng: &mu
     };
     let steps = rng.range(scaled(22) as i64, scaled(38) as i64) as i32;
     let width = 1 + rng.below(2) as i32;
-    // Heading in radians; drifts slowly each step (tectonic ridges meander
-    // rather than kink).
-    let mut heading = rng.range(0, 628) as f64 / 100.0;
+    // Heading in integer "direction units" (628 = full circle) so the whole
+    // trajectory is pure integer arithmetic and stays byte-identical across
+    // native and wasm libm. Precomputed integer displacement tables replace
+    // float trig; the heading drifts ~a fraction of a sector each step, so
+    // ridges still meander rather than kink.
+    const MAIN_D: [(i32, i32); 32] = [
+        (2, 0),
+        (2, 0),
+        (2, 1),
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (1, 2),
+        (0, 2),
+        (0, 2),
+        (0, 2),
+        (-1, 2),
+        (-1, 1),
+        (-1, 1),
+        (-1, 1),
+        (-2, 1),
+        (-2, 0),
+        (-2, 0),
+        (-2, 0),
+        (-2, -1),
+        (-1, -1),
+        (-1, -1),
+        (-1, -1),
+        (-1, -2),
+        (0, -2),
+        (0, -2),
+        (0, -2),
+        (1, -2),
+        (1, -1),
+        (1, -1),
+        (1, -1),
+        (2, -1),
+        (2, 0),
+    ];
+    const BRANCH_D: [(i32, i32); 32] = [
+        (1, 0),
+        (1, 0),
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 1),
+        (-1, 1),
+        (-1, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, 0),
+        (-1, 0),
+        (-1, -1),
+        (-1, -1),
+        (-1, -1),
+        (-1, -1),
+        (-1, -1),
+        (0, -1),
+        (0, -1),
+        (0, -1),
+        (1, -1),
+        (1, -1),
+        (1, -1),
+        (1, -1),
+        (1, -1),
+        (1, 0),
+    ];
+    let sector = |heading: i64| -> usize { ((heading.rem_euclid(628) as u64) * 32 / 628) as usize };
+    let mut heading = rng.range(0, 628);
     let branch_at = 6 + rng.below(8) as i32;
     let mut branch_left = 0; // steps remaining on the secondary fault line
-    let mut branch_heading = heading + 0.9;
+    let mut branch_heading = heading + 90; // ~0.9 rad offset (the branch's own axis)
     for step in 0..steps {
         // Draw heading noise unconditionally (boundary-stable).
-        let turn = (rng.next_u64() % 23) as f64 - 11.0; // ±11 degrees
-        heading += turn.to_radians();
-        x += (heading.cos() * 1.7).round() as i32;
-        y += (heading.sin() * 1.7).round() as i32;
+        heading = heading.rem_euclid(628) + (rng.next_u64() % 23) as i64 - 11;
+        let (dx, dy) = MAIN_D[sector(heading)];
+        x += dx;
+        y += dy;
         x = x.clamp(scaled(6), scaled(57));
         y = y.clamp(scaled(6), scaled(57));
         if step == branch_at {
-            branch_heading = heading + 0.9;
+            branch_heading = heading + 90;
             branch_left = 7 + rng.below(5);
         }
         // Paint the ridge spine; a narrow gate every so often forms passes.
@@ -993,9 +1187,10 @@ fn paint_mountain_chain(terrain: &mut [Terrain], passable: &mut [bool], rng: &mu
         // The secondary fault line branches off and continues a short way.
         if branch_left > 0 {
             branch_left -= 1;
-            branch_heading += (rng.next_u64() % 21) as f64 / 100.0 - 0.10;
-            let bx = x + (branch_heading.cos() * 1.4).round() as i32;
-            let by = y + (branch_heading.sin() * 1.4).round() as i32;
+            branch_heading = branch_heading.rem_euclid(628) + (rng.next_u64() % 21) as i64 - 10;
+            let (bdx, bdy) = BRANCH_D[sector(branch_heading)];
+            let bx = x + bdx;
+            let by = y + bdy;
             for dy in -width..=width {
                 for dx in -width..=width {
                     set_terrain(terrain, passable, bx + dx, by + dy, Terrain::Mountain);
@@ -1114,6 +1309,87 @@ fn paint_spawn_ring(
                 }
             };
             set_terrain(terrain, passable, x, y, kind);
+        }
+    }
+}
+
+/// Scatter a few small groves in the 4-tile band around spawn so the opening
+/// view has texture — the base clearing itself stays open plains,
+/// while forests/hills nearby give the home region character and a first hint
+/// of the biome palette. Kinds follow the local climate; pure integer hashes
+/// keep the placement deterministic on native and wasm.
+fn paint_home_groves(
+    terrain: &mut [Terrain],
+    passable: &mut [bool],
+    hq: (u8, u8),
+    seed: u64,
+    moisture: &[u8],
+    temperature: &[u8],
+) {
+    const OFFSETS: [(i32, i32); 8] = [
+        (scaled(2), 0),
+        (0, scaled(2)),
+        (-scaled(2), 0),
+        (0, -scaled(2)),
+        (scaled(2), scaled(1)),
+        (-scaled(2), scaled(1)),
+        (scaled(1), -scaled(2)),
+        (-scaled(1), -scaled(2)),
+    ];
+    let mut used = [false; 8];
+    for i in 0..4 {
+        // Pick an unused offset deterministically (linear probing on a hash).
+        let mut pick = (map_hash(seed ^ (i as u64 * 0x9E37_79B9), hq.0, hq.1) % 8) as usize;
+        while used[pick] {
+            pick = (pick + 1) % 8;
+        }
+        used[pick] = true;
+        let (dx, dy) = OFFSETS[pick];
+        let cx = hq.0 as i32 + dx;
+        let cy = hq.1 as i32 + dy;
+        if !in_bounds(cx, cy) {
+            continue;
+        }
+        let idx = tile_index(cx as u8, cy as u8);
+        let m = moisture[idx];
+        let t = temperature[idx];
+        let n = map_hash(seed, cx as u8, cy as u8) % 100;
+        let kind = if t >= 185 && m >= 120 {
+            if n < 55 {
+                Terrain::Forest
+            } else {
+                Terrain::Swamp
+            }
+        } else if m <= 60 {
+            if n < 55 {
+                Terrain::Desert
+            } else {
+                Terrain::Hills
+            }
+        } else if t < 70 {
+            if n < 55 {
+                Terrain::Hills
+            } else {
+                Terrain::Forest
+            }
+        } else if n < 55 {
+            Terrain::Forest
+        } else {
+            Terrain::Hills
+        };
+        set_terrain(terrain, passable, cx, cy, kind);
+        // Occasional one-tile extension for a less dot-like look, kept off
+        // the HQ pad itself (distance >= 2).
+        for (ex, ey) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let nx = cx + ex;
+            let ny = cy + ey;
+            if !in_bounds(nx, ny) {
+                continue;
+            }
+            let nd = (nx - hq.0 as i32).abs().max((ny - hq.1 as i32).abs());
+            if nd >= 2 && map_hash(seed ^ 0xB0B0_B0B0, nx as u8, ny as u8).is_multiple_of(4) {
+                set_terrain(terrain, passable, nx, ny, kind);
+            }
         }
     }
 }
@@ -1346,10 +1622,13 @@ fn candidate_score(
     score += terrain_bonus;
     match zone {
         SiteZone::Local => {
-            if !(scaled(4)..=scaled(10)).contains(&own_d) || enemy_d < scaled(18) {
+            // Local sites sit inside (or right at the edge of) the HQ's
+            // opening sightline, so a fresh spawn always sees its first
+            // deposit instead of exploring for ore.
+            if !(scaled(2)..=scaled(5)).contains(&own_d) || enemy_d < scaled(18) {
                 return None;
             }
-            score += 3000 - (own_d - scaled(6)).abs() * 130 + enemy_d * 4;
+            score += 3000 - (own_d - scaled(3)).abs() * 140 + enemy_d * 4;
         }
         SiteZone::Secondary => {
             if !(scaled(11)..=scaled(23)).contains(&own_d) || enemy_d < scaled(13) {
@@ -1404,7 +1683,7 @@ fn choose_site(
                     (c.0 as i32 - x as i32)
                         .abs()
                         .max((c.1 as i32 - y as i32).abs())
-                        < scaled(6)
+                        < scaled(4)
                 })
             {
                 continue;
@@ -1503,17 +1782,20 @@ fn has_opening_resources(map: &Map) -> bool {
     for &hq in &map.hq_tiles {
         let local_ore = (0..MAP_TILES).any(|idx| {
             let tile = tile_coords(idx);
-            chebyshev_distance(tile, hq) <= scaled(10)
+            chebyshev_distance(tile, hq) <= scaled(5)
                 && map.resource_at(tile.0, tile.1) == Some(ResourceType::Ore)
         });
-        let local_secondary = (0..MAP_TILES).any(|idx| {
+        let local_steel = (0..MAP_TILES).any(|idx| {
             let tile = tile_coords(idx);
-            chebyshev_distance(tile, hq) <= scaled(23)
-                && map
-                    .resource_at(tile.0, tile.1)
-                    .is_some_and(|kind| matches!(kind, ResourceType::Steel | ResourceType::Coal))
+            chebyshev_distance(tile, hq) <= scaled(8)
+                && map.resource_at(tile.0, tile.1) == Some(ResourceType::Steel)
         });
-        if !local_ore || !local_secondary {
+        let local_coal = (0..MAP_TILES).any(|idx| {
+            let tile = tile_coords(idx);
+            chebyshev_distance(tile, hq) <= scaled(8)
+                && map.resource_at(tile.0, tile.1) == Some(ResourceType::Coal)
+        });
+        if !local_ore || !local_steel || !local_coal {
             return false;
         }
     }

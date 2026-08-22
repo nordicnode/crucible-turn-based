@@ -431,7 +431,16 @@ impl Store {
                 row.get(0)
             })
             .optional()?;
-        Ok(json.map(|s| serde_json::from_str(&s).expect("stored weights are valid JSON")))
+        json.map(|s| {
+            serde_json::from_str(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })
+        .transpose()
     }
 
     /// Ancestor chain for a genome, most-recent first (includes `id` itself).
@@ -647,6 +656,7 @@ impl Store {
     ) -> Result<Vec<i64>, rusqlite::Error> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
+        let mut ids = Vec::with_capacity(rows.len());
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO genomes (generation, parent_id, weights, born_from, created_at)
@@ -661,15 +671,13 @@ impl Store {
                     born,
                     unix_now(),
                 ])?;
+                // Capture each inserted row's id directly instead of re-reading
+                // by generation: a crash-restart within a generation would
+                // otherwise re-insert rows and make the by-generation re-read
+                // return duplicates, corrupting the parent/winner association.
+                ids.push(tx.last_insert_rowid());
             }
         }
-        // Re-read ids in insertion order.
-        let ids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT id FROM genomes WHERE generation = ?1 ORDER BY id ASC")?;
-            let rows = stmt.query_map([generation], |r| r.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
         tx.commit()?;
         Ok(ids)
     }

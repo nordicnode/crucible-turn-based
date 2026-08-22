@@ -5,6 +5,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rayon::prelude::*;
+
 use crucible_evo::{
     ghost_fitness, head_to_head, run_gauntlet, self_play_fitness, Curriculum, CurriculumConfig,
     EsParams, GauntletConfig, Ghost, GhostPool, Population, Stage,
@@ -189,6 +191,10 @@ pub struct Trainer {
     pop: Population,
     ids: Vec<i64>,
     champion: Option<Champion>,
+    /// Whether a `regression_alarm` was already emitted for the current
+    /// below-floor streak, so the event fire once per bad series rather than
+    /// on every qualifying generation.
+    floor_alarm_active: bool,
     historical: Vec<Vec<f32>>,
     ghost_pool: GhostPool,
     /// Highest stored match id already converted into a ghost; new human
@@ -379,6 +385,7 @@ impl Trainer {
             pop,
             ids,
             champion,
+            floor_alarm_active: false,
             historical,
             ghost_pool,
             ghost_last_id,
@@ -430,54 +437,95 @@ impl Trainer {
             .as_ref()
             .map(|c| (c.weights.clone(), c.elo, c.genome_id));
 
-        // Evaluate every genome (self-play + champion + ghosts).
-        let mut fitnesses = Vec::with_capacity(self.pop.genomes.len());
-        for (i, genome) in self.pop.genomes.iter().enumerate() {
-            let mut opponents = Vec::new();
-            let mut srng = Rng::from_seed(mix(self.master_seed, generation, i as u64 + 1));
-            for _ in 0..self.cfg.self_play_opponents.min(self.pop.genomes.len()) {
-                let mut idx = srng.below(self.pop.genomes.len() as u64) as usize;
-                // A genome never evaluates against itself (that signal is
-                // noise); wrap to the next member instead.
-                if idx == i && self.pop.genomes.len() > 1 {
-                    idx = (i + 1) % self.pop.genomes.len();
-                }
-                opponents.push(self.pop.genomes[idx].clone());
-            }
-            let mut sp = self_play_fitness(genome, &opponents, &seeds, &self.game_config);
-
-            // The reigning champion is a self-play opponent too (blended as
-            // one equal-weight slot, exactly as before) — and its per-match
-            // outcomes feed the Elo league so every genome carries a rating.
-            if let Some((champ_weights, champ_elo, champ_id)) = &champion_eval {
-                let (rate, outcomes) =
-                    head_to_head(genome, champ_weights, &seeds, &self.game_config);
-                let n = opponents.len().max(1) as f32;
-                sp = (sp * n + rate) / (n + 1.0);
-
-                if self.ids[i] != *champ_id {
-                    let mut rating = self
-                        .store
-                        .elo_history(self.ids[i])
-                        .ok()
-                        .and_then(|h| h.last().map(|p| p.elo))
-                        .unwrap_or(1500.0);
-                    for o in outcomes {
-                        rating = crucible_evo::league::update(rating, *champ_elo, o);
+        // Evaluate every genome (self-play + champion + ghosts). The match
+        // simulation is pure CPU and side-effect-free, and each genome is
+        // independent, so it runs in parallel across all cores (rayon) rather
+        // than one-at-a-time on the blocking pool. The per-genome Elo store
+        // writes stay sequential in `i` order below, so behavior and
+        // determinism are unchanged.
+        let pop_len = self.pop.genomes.len();
+        let cfg_spp = self.cfg.self_play_opponents.min(pop_len);
+        let cfg_ghost_weight = self.cfg.ghost_weight;
+        let master_seed = self.master_seed;
+        let eval_results = {
+            let genomes = &self.pop.genomes;
+            let seeds_ref = &seeds;
+            let ghosts_ref = &ghosts;
+            genomes
+                .par_iter()
+                .enumerate()
+                .map(|(i, genome)| {
+                    // Self-play opponents, sampled deterministically per genome.
+                    let mut opponents = Vec::with_capacity(cfg_spp);
+                    let mut srng = Rng::from_seed(mix(master_seed, generation, i as u64 + 1));
+                    for _ in 0..cfg_spp {
+                        let mut idx = srng.below(pop_len as u64) as usize;
+                        // A genome never evaluates against itself (that signal
+                        // is noise); wrap to the next member instead.
+                        if idx == i && pop_len > 1 {
+                            idx = (i + 1) % pop_len;
+                        }
+                        opponents.push(genomes[idx].clone());
                     }
-                    if let Err(e) = self.store.record_elo(self.ids[i], rating) {
-                        tracing::warn!("failed to record Elo for genome {}: {e}", self.ids[i]);
-                    }
-                }
-            }
+                    let mut sp =
+                        self_play_fitness(genome, &opponents, seeds_ref, &self.game_config);
 
-            let fitness = if ghosts.is_empty() {
-                sp
-            } else {
-                let g = ghost_fitness(genome, &ghosts, &self.game_config);
-                (1.0 - self.cfg.ghost_weight) * sp + self.cfg.ghost_weight * g
+                    // The reigning champion is a self-play opponent too
+                    // (blended as one equal-weight slot, exactly as before) —
+                    // and its per-match outcomes feed the Elo league so every
+                    // genome carries a rating.
+                    let mut champ_outcomes: Option<Vec<crucible_evo::Outcome>> = None;
+                    if let Some((champ_weights, _champ_elo, _champ_id)) = champion_eval.as_ref() {
+                        let (rate, outcomes) =
+                            head_to_head(genome, champ_weights, seeds_ref, &self.game_config);
+                        champ_outcomes = Some(outcomes);
+                        let n = opponents.len().max(1) as f32;
+                        sp = (sp * n + rate) / (n + 1.0);
+                    }
+
+                    let ghost = if ghosts_ref.is_empty() {
+                        None
+                    } else {
+                        Some(ghost_fitness(genome, ghosts_ref, &self.game_config))
+                    };
+                    (sp, champ_outcomes, ghost)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut fitnesses = Vec::with_capacity(pop_len);
+        for (i, (sp, champ_outcomes, ghost)) in eval_results.into_iter().enumerate() {
+            let fitness = match ghost {
+                None => sp,
+                Some(g) => (1.0 - cfg_ghost_weight) * sp + cfg_ghost_weight * g,
             };
             fitnesses.push(fitness);
+
+            // Elo league — store side effects stay sequential in `i` order.
+            if let Some(outcomes) = champ_outcomes {
+                if let Some((_champ_weights, champ_elo, champ_id)) = &champion_eval {
+                    // `self.ids[i] != champ_id` only diverges in the bootstrap
+                    // first generation, where the just-crowned champion is
+                    // still a member of the current population; we skip its Elo
+                    // update to avoid recording a champion-vs-self match. In
+                    // steady state the champion is from an earlier generation
+                    // and never appears in `self.ids`, so every genome updates.
+                    if self.ids[i] != *champ_id {
+                        let mut rating = self
+                            .store
+                            .elo_history(self.ids[i])
+                            .ok()
+                            .and_then(|h| h.last().map(|p| p.elo))
+                            .unwrap_or(1500.0);
+                        for o in outcomes {
+                            rating = crucible_evo::league::update(rating, *champ_elo, o);
+                        }
+                        if let Err(e) = self.store.record_elo(self.ids[i], rating) {
+                            tracing::warn!("failed to record Elo for genome {}: {e}", self.ids[i]);
+                        }
+                    }
+                }
+            }
         }
 
         let winner_idx = self.pop.best_index(&fitnesses);
@@ -550,9 +598,10 @@ impl Trainer {
     /// The §5.8 floor check. Every `floor_check_every` generations, play the
     /// reigning champion against the hard bot on `floor_check_seeds` held-out
     /// seeds (both spawn sides) and record the rate. Below
-    /// `floor_min_win_rate` a `regression_alarm` event is emitted for the away
-    /// report; the latest rate is surfaced in `/api/status` either way.
-    fn floor_check(&self, generation: u32) -> Result<(), rusqlite::Error> {
+    /// `floor_min_win_rate` a `regression_alarm` event is emitted once per
+    /// below-floor streak (edge-triggered, so a sustained regression spams no
+    /// more than a single alarm).
+    fn floor_check(&mut self, generation: u32) -> Result<(), rusqlite::Error> {
         if !generation.is_multiple_of(self.cfg.floor_check_every) {
             return Ok(());
         }
@@ -575,16 +624,21 @@ impl Trainer {
             },
         );
         if rate < self.cfg.floor_min_win_rate {
-            self.emit_event(
-                "regression_alarm",
-                serde_json::json!({
-                    "genome_id": champion.genome_id,
-                    "generation": generation,
-                    "champion_hard_win_rate": rate,
-                    "floor": self.cfg.floor_min_win_rate,
-                    "seeds": seeds.len() * 2,
-                }),
-            );
+            if !self.floor_alarm_active {
+                self.floor_alarm_active = true;
+                self.emit_event(
+                    "regression_alarm",
+                    serde_json::json!({
+                        "genome_id": champion.genome_id,
+                        "generation": generation,
+                        "champion_hard_win_rate": rate,
+                        "floor": self.cfg.floor_min_win_rate,
+                        "seeds": seeds.len() * 2,
+                    }),
+                );
+            }
+        } else {
+            self.floor_alarm_active = false;
         }
         Ok(())
     }
@@ -790,7 +844,11 @@ fn load_ghost_pool_into(
     // One query fetches the replay JSON alongside each match row (looping
     // `get_replay` per row would be an N+1 query against the store mutex).
     let matches = if since_id == 0 {
-        let mut m = store.list_matches_with_replay(500)?;
+        // Cold-start adoption: load the full history up to the caller's budget
+        // (the Trainer::start call passes usize::MAX = everything). A fixed
+        // 500-row window plus the persisted cursor would otherwise skip every
+        // human match older than the newest 500 forever.
+        let mut m = store.list_matches_with_replay(max_new.min(u32::MAX as usize) as u32)?;
         m.reverse(); // newest-first -> oldest-first
         m
     } else {

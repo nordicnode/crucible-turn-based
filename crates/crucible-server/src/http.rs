@@ -3,7 +3,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -17,6 +17,29 @@ use crate::AppState;
 
 fn err(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Optional admin gate for mutating diagnostic endpoints. Only enforced when
+/// `CRUCIBLE_ADMIN_TOKEN` is configured; an unset server (typical localhost
+/// dev) stays open. Protects `/api/report` and `/api/autobattle` — which run
+/// expensive simulations and append DB rows — from arbitrary remote callers
+/// should the server ever bind beyond localhost.
+fn check_admin(headers: &HeaderMap, admin_token: &Option<String>) -> Result<(), StatusCode> {
+    match admin_token {
+        None => Ok(()),
+        Some(expected) => {
+            let supplied = headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(str::trim);
+            if supplied == Some(expected.as_str()) {
+                Ok(())
+            } else {
+                Err(StatusCode::UNAUTHORIZED)
+            }
+        }
+    }
 }
 
 /// Run a blocking store operation on the blocking pool so the async runtime
@@ -171,8 +194,12 @@ pub async fn training_stats(
 /// trainer will persist these at promotion time in M6).
 pub async fn report(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((old, new)): Path<(i64, i64)>,
 ) -> impl IntoResponse {
+    if let Err(status) = check_admin(&headers, &state.admin_token) {
+        return (status, "authorization required").into_response();
+    }
     let _permit = match state.diagnostics.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -183,16 +210,26 @@ pub async fn report(
                 .into_response()
         }
     };
-    let store = &state.store;
-    let old_w = match store.get_genome_weights(old) {
-        Ok(Some(w)) => w,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such old genome").into_response(),
-        Err(e) => return err(e).into_response(),
-    };
-    let new_w = match store.get_genome_weights(new) {
-        Ok(Some(w)) => w,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such new genome").into_response(),
-        Err(e) => return err(e).into_response(),
+    let store = state.store.clone();
+    // Fetch weights off the async runtime: SQLite sits behind the store mutex,
+    // and the trainer's generation checkpoint can hold that mutex for a while
+    // (the other handlers route store calls through `blocking` for this reason).
+    let (old_w, new_w) = match blocking(
+        move || -> Result<(Vec<f32>, Vec<f32>), (StatusCode, String)> {
+            let old_w = store.get_genome_weights(old).map_err(err)?;
+            let new_w = store.get_genome_weights(new).map_err(err)?;
+            match (old_w, new_w) {
+                (Some(a), Some(b)) => Ok((a, b)),
+                (None, _) => Err((StatusCode::NOT_FOUND, "no such old genome".into())),
+                (_, None) => Err((StatusCode::NOT_FOUND, "no such new genome".into())),
+            }
+        },
+    )
+    .await
+    {
+        Ok(Ok(weights)) => weights,
+        Ok(Err(e)) => return e.into_response(),
+        Err(e) => return e.into_response(),
     };
 
     // Small evaluation set so the endpoint stays snappy.
@@ -220,9 +257,13 @@ pub struct AutoBattleQuery {
 /// return the result plus a full, re-runnable replay.
 pub async fn autobattle(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((a, b)): Path<(i64, i64)>,
     Query(q): Query<AutoBattleQuery>,
 ) -> impl IntoResponse {
+    if let Err(status) = check_admin(&headers, &state.admin_token) {
+        return (status, "authorization required").into_response();
+    }
     let _permit = match state.diagnostics.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -233,21 +274,19 @@ pub async fn autobattle(
                 .into_response()
         }
     };
-    let store = &state.store;
-    let wa = match store.get_genome_weights(a) {
-        Ok(Some(w)) => w,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such genome a").into_response(),
-        Err(e) => return err(e).into_response(),
-    };
-    let wb = match store.get_genome_weights(b) {
-        Ok(Some(w)) => w,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such genome b").into_response(),
-        Err(e) => return err(e).into_response(),
-    };
-
     let seed = q.seed.unwrap_or(1);
     let store = state.store.clone();
     match tokio::task::spawn_blocking(move || {
+        // Both the weight fetches (SQLite behind the store mutex) and the
+        // match simulation must run off the async runtime (see `blocking`).
+        let wa = store
+            .get_genome_weights(a)
+            .map_err(err)?
+            .ok_or((StatusCode::NOT_FOUND, "no such genome a".into()))?;
+        let wb = store
+            .get_genome_weights(b)
+            .map_err(err)?
+            .ok_or((StatusCode::NOT_FOUND, "no such genome b".into()))?;
         // Diagnostics must have a predictable CPU ceiling; live matches retain
         // the normal configurable full-length timeout in the websocket path.
         let cfg = GameConfig {
@@ -268,11 +307,11 @@ pub async fn autobattle(
                 &replay_json,
             )
             .ok();
-        (outcome, replay_json, replay_id)
+        Ok::<_, (StatusCode, String)>((outcome, replay_json, replay_id))
     })
     .await
     {
-        Ok((outcome, replay_json, replay_id)) => Json(json!({
+        Ok(Ok((outcome, replay_json, replay_id))) => Json(json!({
             "seed": seed,
             "winner": outcome.outcome.winner.map(|p| p.index() as u8),
             "reason": outcome.outcome.reason,
@@ -282,6 +321,7 @@ pub async fn autobattle(
             "replay": serde_json::from_str::<Value>(&replay_json).unwrap_or(Value::Null),
         }))
         .into_response(),
+        Ok(Err(e)) => e.into_response(),
         Err(e) => err(format!("diagnostic task failed: {e}")).into_response(),
     }
 }
@@ -308,6 +348,7 @@ mod tests {
             trainer: Arc::new(crate::trainer::TrainerShared::default()),
             diagnostics: Arc::new(tokio::sync::Semaphore::new(1)),
             live_matches: Arc::new(tokio::sync::Semaphore::new(8)),
+            admin_token: None,
             started_at: std::time::Instant::now(),
         }
     }
@@ -411,6 +452,7 @@ mod tests {
             trainer: Arc::new(crate::trainer::TrainerShared::default()),
             diagnostics: Arc::new(tokio::sync::Semaphore::new(1)),
             live_matches: Arc::new(tokio::sync::Semaphore::new(8)),
+            admin_token: None,
             started_at: std::time::Instant::now(),
         };
 

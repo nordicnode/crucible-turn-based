@@ -1,0 +1,41 @@
+{
+  "rules": {
+    "high-complexity": { "threshold": 50 },
+    "high-fan-out": { "threshold": 35 },
+    "large-class": { "disable": ["large-class", "ast-grep:large-class"] },
+    "long-parameter-list": {
+      "disable": ["long-parameter-list", "ast-grep:long-parameter-list"]
+    },
+    "no-flag-argument": {
+      "disable": ["no-flag-argument", "ast-grep:no-flag-argument"]
+    },
+    "hardcoded-url": { "disable": ["hardcoded-url", "ast-grep:hardcoded-url"] },
+    "find-import-file-without-extension": {
+      "disable": [
+        "find-import-file-without-extension",
+        "ast-grep:find-import-file-without-extension"
+      ]
+    },
+    "prefer-query-selector": {
+      "disable": ["prefer-query-selector", "ast-grep:prefer-query-selector"]
+    },
+    "prefer-dom-node-append": {
+      "disable": ["prefer-dom-node-append", "ast-grep:prefer-dom-node-append"]
+    },
+    "prefer-at": { "disable": ["prefer-at", "ast-grep:prefer-at"] },
+    "nested-ternary": { "disable": ["nested-ternary", "ast-grep:nested-ternary"] },
+    "prefer-optional-chain": {
+      "disable": ["prefer-optional-chain", "ast-grep:prefer-optional-chain"]
+    },
+    "no-array-constructor": {
+      "disable": ["no-array-constructor", "ast-grep:no-array-constructor"]
+    },
+    "no-array-reverse-mutation": {
+      "disable": ["no-array-reverse-mutation", "ast-grep:no-array-reverse-mutation"]
+    },
+    "no-known-value-widening": {
+      "disable": ["no-known-value-widening", "ast-grep:no-known-value-widening"]
+    },
+    "typos": { "disable": ["typos"] }
+  }
+}

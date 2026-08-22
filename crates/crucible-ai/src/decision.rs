@@ -128,10 +128,15 @@ pub fn decide(
         }
     }
     build_candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Shared batch ledger so two eager build actions don't collide on the
+    // same tile (the sim would drop the second placement, wasting a slot).
+    // `find_build_tile` reads `used_tiles`; the caller books each chosen tile.
+    let mut plan = crate::scripted::Plan::default();
     for (_, i) in build_candidates.into_iter().take(2) {
         let btype = LEARNED_BUILD_TYPES[i];
         if let Some(pref) = build_preferred(game, player, btype) {
-            if let Some(tile) = find_build_tile(game, player, btype, pref, &Default::default()) {
+            if let Some(tile) = find_build_tile(game, player, btype, pref, &plan) {
+                plan.used_tiles.push(tile);
                 cmds.push(Command::PlaceBuilding {
                     player,
                     btype,
@@ -153,13 +158,10 @@ pub fn decide(
             && build_allowed(game, player, BuildingType::PowerPlant)
         {
             if let Some(pref) = build_preferred(game, player, BuildingType::PowerPlant) {
-                if let Some(tile) = find_build_tile(
-                    game,
-                    player,
-                    BuildingType::PowerPlant,
-                    pref,
-                    &Default::default(),
-                ) {
+                if let Some(tile) =
+                    find_build_tile(game, player, BuildingType::PowerPlant, pref, &plan)
+                {
+                    plan.used_tiles.push(tile);
                     cmds.push(Command::PlaceBuilding {
                         player,
                         btype: BuildingType::PowerPlant,

@@ -28,6 +28,20 @@ interface TrainingStat {
   at: number;
 }
 
+interface RecentEvent {
+  kind: string;
+  payload: unknown;
+  at: number;
+}
+
+interface StatusPayload {
+  ok: boolean;
+  uptime_secs: number;
+  counts: { matches: number; genomes: number; champions: number; events: number };
+  recent_events: RecentEvent[];
+  trainer: { running: boolean; generation: number | null; matches_run: number };
+}
+
 async function get<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: ${res.status}`);
@@ -57,7 +71,7 @@ async function show(): Promise<void> {
   setText("dash-status", "loading…");
   try {
     const [status, champion, stats, museum, eloHist] = await Promise.all([
-      get<any>("/api/status"),
+      get<StatusPayload>("/api/status"),
       get<{ champion: ChampionPayload | null }>("/api/champion"),
       get<{ stats: TrainingStat[] }>("/api/training-stats"),
       get<{ champions: ChampionPayload[] }>("/api/museum"),
@@ -66,7 +80,7 @@ async function show(): Promise<void> {
 
     renderChampion(champion.champion);
     renderElo(eloHist.points);
-    renderStats(status, stats.stats);
+    renderStats(status.trainer, stats.stats);
     renderMuseum(museum.champions);
     renderEvents(status.recent_events ?? []);
     setText("dash-status", "");
@@ -75,27 +89,40 @@ async function show(): Promise<void> {
   }
 }
 
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+  text?: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
 function renderChampion(c: ChampionPayload | null): void {
   const elt = document.getElementById("dash-champion");
   if (!elt) return;
+  elt.replaceChildren();
   if (!c) {
-    elt.innerHTML = "<p>No champion yet — the trainer has not crowned one.</p>";
+    elt.appendChild(el("p", "muted", "No champion yet — the trainer has not crowned one."));
     return;
   }
-  const elo = c.elo == null ? "—" : String(Math.round(c.elo));
-  elt.innerHTML = `
-    <div class="champ">
-      <strong>Champion #${c.genome_id}</strong>
-      <span>generation ${c.generation}</span>
-      <span>Elo ${elo}</span>
-      ${c.era ? `<span>${c.era}</span>` : ""}
-      <span class="muted">crowned ${new Date(c.crowned_at * 1000).toLocaleString()}</span>
-    </div>`;
+  const champ = el("div", "champ");
+  champ.appendChild(el("strong", undefined, `Champion #${c.genome_id}`));
+  champ.appendChild(el("span", undefined, `generation ${c.generation}`));
+  champ.appendChild(el("span", undefined, `Elo ${c.elo == null ? "—" : String(Math.round(c.elo))}`));
+  if (c.era) champ.appendChild(el("span", undefined, c.era));
+  champ.appendChild(
+    el("span", "muted", `crowned ${new Date(c.crowned_at * 1000).toLocaleString()}`),
+  );
+  elt.appendChild(champ);
 }
 
 function renderElo(points: EloPoint[]): void {
   const elt = document.getElementById("dash-elo");
   if (!elt) return;
+  elt.replaceChildren();
   if (points.length < 2) {
     elt.textContent = "Not enough league matches for an Elo graph yet.";
     return;
@@ -106,13 +133,21 @@ function renderElo(points: EloPoint[]): void {
   const span = max - min || 1;
   const w = 320;
   const h = 60;
-  elt.innerHTML = `
-    <div class="muted">Champion Elo over time (${Math.round(vals[0])} → ${Math.round(vals[vals.length - 1])})</div>
-    <canvas width="${w}" height="${h}" class="spark" aria-label="Champion Elo over time"></canvas>`;
+  elt.appendChild(
+    el(
+      "div",
+      "muted",
+      `Champion Elo over time (${Math.round(vals[0])} → ${Math.round(vals[vals.length - 1])})`,
+    ),
+  );
+  const canvas = el("canvas", "spark");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.setAttribute("aria-label", "Champion Elo over time");
+  elt.appendChild(canvas);
 
-  const chart = elt.querySelector("canvas");
-  const ctx = chart?.getContext("2d");
-  if (!chart || !ctx) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
   ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = "#070a0e";
   ctx.fillRect(0, 0, w, h);
@@ -128,49 +163,96 @@ function renderElo(points: EloPoint[]): void {
   ctx.stroke();
 }
 
-function renderStats(status: any, stats: TrainingStat[]): void {
+function renderStats(trainer: StatusPayload["trainer"], stats: TrainingStat[]): void {
   const elt = document.getElementById("dash-stats");
   if (!elt) return;
-  const t = status.trainer ?? {};
   const latest = stats[stats.length - 1];
-  elt.innerHTML = `
-    <div class="muted">Trainer: ${t.running ? "running" : "idle"} · generation ${t.generation ?? 0} · ${(t.matches_run ?? 0).toLocaleString()} matches</div>
-    ${latest
-      ? `<div>latest gen ${latest.generation}: fitness mean ${latest.pop_fitness_mean.toFixed(3)} / best ${latest.pop_fitness_best.toFixed(3)} · diversity ${latest.diversity.toFixed(3)}</div>`
-      : ""}`;
+  elt.replaceChildren(
+    el(
+      "div",
+      "muted",
+      `Trainer: ${trainer.running ? "running" : "idle"} · generation ${trainer.generation ?? 0} · ${(
+        trainer.matches_run ?? 0
+      ).toLocaleString()} matches`,
+    ),
+  );
+  if (latest) {
+    elt.appendChild(
+      el(
+        "div",
+        undefined,
+        `latest gen ${latest.generation}: fitness mean ${latest.pop_fitness_mean.toFixed(3)} / best ${latest.pop_fitness_best.toFixed(3)} · diversity ${latest.diversity.toFixed(3)}`,
+      ),
+    );
+  }
 }
 
 function renderMuseum(champions: ChampionPayload[]): void {
   const elt = document.getElementById("dash-museum");
   if (!elt) return;
+  elt.replaceChildren();
+  elt.appendChild(el("h2", undefined, "Museum"));
   if (champions.length === 0) {
-    elt.innerHTML = "<div class=\"muted\">Museum is empty.</div>";
+    elt.appendChild(el("div", "muted", "Museum is empty."));
     return;
   }
-  const rows = [...champions].reverse().slice(0, 12).map((c) => {
-    const elo = c.elo == null ? "—" : String(Math.round(c.elo));
+  const table = el("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const cell of ["genome", "gen", "elo", "era", ""]) {
+    const th = document.createElement("th");
+    th.textContent = cell;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  // Last 12 champions, most-recent first (no mutating `.reverse()`).
+  const start = Math.max(0, champions.length - 12);
+  for (let i = champions.length - 1; i >= start; i--) {
+    const c = champions[i];
+    const tr = document.createElement("tr");
     const badge = c.reigning ? "👑 reigning" : "dethroned";
-    const era = c.era ? `<td>${c.era}</td>` : "<td></td>";
-    return `<tr><td>#${c.genome_id}</td><td>gen ${c.generation}</td><td>Elo ${elo}</td>${era}<td>${badge}</td></tr>`;
-  });
-  elt.innerHTML = `
-    <h2>Museum</h2>
-    <table><thead><tr><th>genome</th><th>gen</th><th>elo</th><th>era</th><th></th></tr></thead>
-    <tbody>${rows.join("")}</tbody></table>`;
+    for (const cell of [
+      `#${c.genome_id}`,
+      `gen ${c.generation}`,
+      `Elo ${c.elo == null ? "—" : String(Math.round(c.elo))}`,
+      c.era ?? "",
+      badge,
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  elt.appendChild(table);
 }
 
-function renderEvents(events: Array<{ kind: string; payload: any; at: number }>): void {
+function renderEvents(events: RecentEvent[]): void {
   const elt = document.getElementById("dash-events");
   if (!elt) return;
+  elt.replaceChildren();
+  elt.appendChild(el("h2", undefined, "While you were away"));
   if (events.length === 0) {
-    elt.innerHTML = "<h2>While you were away</h2><div class=\"muted\">Nothing yet.</div>";
+    elt.appendChild(el("div", "muted", "Nothing yet."));
     return;
   }
-  const rows = events.slice(0, 10).map((e) => {
-    const when = new Date(e.at * 1000).toLocaleTimeString();
-    return `<tr><td>${when}</td><td>${e.kind}</td></tr>`;
-  });
-  elt.innerHTML = `<h2>While you were away</h2><table><tbody>${rows.join("")}</tbody></table>`;
+  const table = el("table");
+  const tbody = document.createElement("tbody");
+  for (const e of events.slice(0, 10)) {
+    const tr = document.createElement("tr");
+    const when = document.createElement("td");
+    when.textContent = new Date(e.at * 1000).toLocaleTimeString();
+    const kind = document.createElement("td");
+    kind.textContent = e.kind;
+    tr.append(when, kind);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  elt.appendChild(table);
 }
 
 function setText(id: string, text: string): void {

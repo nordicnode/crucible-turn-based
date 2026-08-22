@@ -67,18 +67,6 @@ export const PLAYABLE_UNIT_TYPES: UnitType[] = [
   "Interceptor",
   "SamLauncher",
 ];
-export const TECH_TYPES: TechId[] = [
-  "HighExplosive",
-  "CompositeArmor",
-  "TargetingOptics",
-  "EfficientRefining",
-  "RocketPropulsion",
-  "TitaniumAlloys",
-  "AerialSuperiority",
-  "Superconductors",
-  "CrystalNanotech",
-  "AdvancedBallistics",
-];
 
 // The server's serde format serializes `Player` as the variant name ("P0" /
 // "P1"), so commands must carry the string, not an index.
@@ -105,6 +93,7 @@ export interface ResourceBundle {
 export type Command =
   | { PlaceBuilding: { player: Player; btype: BuildingType; tile: [number, number] } }
   | { TrainUnit: { player: Player; building: number; utype: UnitType } }
+  | { SetRally: { player: Player; building: number; waypoint: [number, number] } }
   | { MoveGroup: { player: Player; units: number[]; waypoint: [number, number] } }
   | { ClearMove: { player: Player; units: number[] } }
   | { Attack: { player: Player; units: number[]; target: number } }
@@ -121,6 +110,11 @@ export function placeBuilding(btype: BuildingType, tile: [number, number]): Comm
 export function trainUnit(building: number, utype: UnitType): Command {
   return { TrainUnit: { player: PLAYER, building, utype } };
 }
+/** Set a production building's rally point (trained units march there). */
+export function setRally(building: number, waypoint: [number, number]): Command {
+  return { SetRally: { player: PLAYER, building, waypoint } };
+}
+
 export function moveGroup(units: number[], waypoint: [number, number]): Command {
   return { MoveGroup: { player: PLAYER, units, waypoint } };
 }
@@ -175,6 +169,9 @@ export interface DiffEntity {
   /** Durable destination and deterministic path preview for own units. */
   moveTarget?: [number, number] | null;
   movementPath?: [number, number][] | null;
+  /** Production rally point (own production buildings): newly-trained units
+   *  auto-march here. */
+  rally?: [number, number] | null;
   moved?: boolean;
   acted?: boolean;
 }
@@ -326,7 +323,8 @@ export type ClientMsg =
   | { type: "joinMatch"; opponent: string }
   | { type: "commands"; cmds: Command[] }
   | { type: "inspectTile"; x: number; y: number }
-  | { type: "endTurn" };
+  | { type: "endTurn" }
+  | { type: "ping" };
 
 export const DEFAULT_TERRAIN_RULES: TerrainRule[] = [
   { kind: "Plains", label: "Plains", passable: true, moveMultiplier: 1, defenseReduction: 0, tacticalTag: "open ground" },
@@ -456,10 +454,6 @@ export const UNIT_COSTS: Record<string, ResourceBundle> = {
   Interceptor: { ore: 200, steel: 80, coal: 100, crystal: 0 },
   SamLauncher: { ore: 180, steel: 100, coal: 50, crystal: 0 },
 };
-
-export function resourceBundleTotal(bundle: ResourceBundle): number {
-  return bundle.ore + bundle.steel + bundle.coal + bundle.crystal;
-}
 
 export function resourceBundleAffordable(resources: ResourceBundle, cost: ResourceBundle): boolean {
   return resources.ore >= cost.ore

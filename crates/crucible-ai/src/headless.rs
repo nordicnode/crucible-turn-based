@@ -48,10 +48,15 @@ pub fn drive_bot_turn(game: &mut Game, player: Player, bot: &mut dyn Bot) -> Vec
     if game.is_over() || game.active != player {
         return Vec::new();
     }
-    let commands = bot.decide(game, player);
+    let mut commands = bot.decide(game, player);
     game.apply_commands(player, &commands);
     if !game.is_over() && game.active == player {
-        game.end_turn();
+        // A policy that omits EndTurn is advanced exactly once via the normal
+        // validation path so a broken bot cannot stall, and the injected
+        // EndTurn is returned so the input-log replay reproduces this turn
+        // byte-identically (EndTurn is free — it costs no action budget).
+        commands.push(Command::EndTurn { player });
+        let _ = game.apply_commands(player, &[Command::EndTurn { player }]);
     }
     commands
 }
