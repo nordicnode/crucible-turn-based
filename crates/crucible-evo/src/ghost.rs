@@ -637,7 +637,7 @@ mod tests {
         // suffer casualties, then verify the ghost can replay *every* recorded
         // command against a fresh, byte-identical match. The old survivor-only
         // mapping dropped commands whose target died in the original match and
-        // mis-ranked survivors whenever the two matches' live sets differed.
+        // misranked survivors whenever the two matches' live sets differed.
         let cfg = GameConfig {
             timeout_turns: 130,
             ..GameConfig::default()
