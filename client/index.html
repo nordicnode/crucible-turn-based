@@ -656,6 +656,18 @@
         background: radial-gradient(circle at 50% 45%, rgba(6, 9, 14, 0.35) 0%, rgba(6, 9, 14, 0.82) 100%);
         z-index: 40;
       }
+      .menu-footer {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 14px;
+        text-align: center;
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+        font-family: var(--serif);
+      }
+      .menu-footer .footer-name { color: var(--gold-bright); font-weight: 700; }
       .panel {
         background: var(--panel-strong);
         backdrop-filter: blur(8px);
@@ -1342,6 +1354,8 @@
         <div id="spectate-list-body"></div>
         <div class="row"><button class="btn" id="spectate-list-back">Return to Briefing</button></div>
       </div>
+
+      <div class="menu-footer">Created by <span class="footer-name">Mikey</span> · Built with Freebuff</div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
