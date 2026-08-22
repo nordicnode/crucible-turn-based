@@ -660,8 +660,16 @@
         position: absolute;
         left: 0;
         right: 0;
-        bottom: 14px;
+        bottom: 12px;
         text-align: center;
+        pointer-events: none;
+      }
+      .menu-footer .footer-inner {
+        display: inline-block;
+        padding: 5px 14px;
+        background: rgba(10, 14, 20, 0.82);
+        border: 1px solid var(--line);
+        border-radius: 3px;
         font-size: 10px;
         letter-spacing: 0.14em;
         color: var(--muted);
@@ -1355,7 +1363,7 @@
         <div class="row"><button class="btn" id="spectate-list-back">Return to Briefing</button></div>
       </div>
 
-      <div class="menu-footer">Created by <span class="footer-name">Mikey</span> · Built with Freebuff</div>
+      <div class="menu-footer"><span class="footer-inner">Created by <span class="footer-name">Mikey</span> · Built with Freebuff</span></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
