@@ -1,24 +1,29 @@
-// Client entry point: lobby, match loop, input, combat FX, and Command Sidebar.
+// Client entry point: lobby, match loop, input, combat FX, and compact command rail.
 // All simulation rules are server-side; this renders tactical state and forwards commands.
-// Matches are strictly alternating-turn: commands apply immediately, EndTurn hands
-// the turn to the opponent, and there is no wall-clock tick.
+// Commands apply immediately; EndTurn resolves the bot synchronously and the
+// next state diff is one complete player-facing round. There is no wall-clock tick.
 
 import { initDashboard } from "./dashboard";
+import { inspectionForTile } from "./inspector";
 import { fx } from "./fx";
 import { IntelLogger } from "./intel";
 import { Net } from "./net";
 import { drawRadar, isBuildingPlacable, Renderer } from "./renderer";
 import { spectate } from "./spectate";
-import { getCursorDataUrl, getThumbnailDataUrl } from "./sprites";
+import { getAssetUrl, getCursorDataUrl, getThumbnailDataUrl } from "./sprites";
 import { World, type Entity } from "./world";
+import { MAP_SIZE, MAP_TILES } from "./types";
 import {
   BUILDING_KINDS,
   BUILDING_POWER,
   BUILD_COSTS,
+  BUILD_STATS,
   TECH_INFO,
   UNIT_COSTS,
   UNIT_KINDS,
+  UNIT_STATS,
   attack,
+  clearMove,
   endTurn,
   moveGroup,
   placeBuilding,
@@ -26,8 +31,13 @@ import {
   sell,
   startResearch,
   trainUnit,
+  formatResourceCost,
+  resourceBundleAffordable,
+  BUILDING_PREREQS,
+  UNIT_TREE,
   type BuildingType,
   type Command,
+  type ResourceBundle,
   type ServerMsg,
   type TechId,
   type UnitType,
@@ -46,36 +56,21 @@ const menuRenderer = new Renderer();
 const menuWorld = new World();
 let menuInit = false;
 
-interface DemoUnit {
-  id: number;
-  kind: string;
-  owner: number;
-  x: number;
-  y: number;
-  targetX: number;
-  targetY: number;
-  speed: number;
-  fireCooldown: number;
-  maxCooldown: number;
-  hp: number;
-  maxHp: number;
-}
-
-let demoUnits: DemoUnit[] = [];
 let demoTime = 0;
 
 let inGame = false;
 let selection = new Set<number>();
 let placementMode: BuildingType | null = null;
 let placementCursor: [number, number] | null = null;
+let selectedTile: [number, number] | null = null;
+/** Tile under the mouse for the movement path preview (U4). */
+let hoverTile: [number, number] | null = null;
 let opponentLabel = "hard";
 
-// Rolling income tracker (per-turn refiner drain)
-const INCOME_WINDOW_TURNS = 10;
-let incomeWindow: { turn: number; amount: number }[] = [];
-
 // Waypoint destination tracking for tactical movement lines
+// (authoritative destinations are refreshed from each state diff).
 const unitWaypoints = new Map<number, [number, number]>();
+let lastInspectorSig = "";
 
 // Input drag and pan state
 let dragStart: [number, number] | null = null;
@@ -98,6 +93,15 @@ function el<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
 }
 
+/** Human-readable climate label for a 0–255 temperature value. */
+function tempLabel(t: number): string {
+  if (t < 60) return "frigid";
+  if (t < 90) return "cold";
+  if (t < 140) return "cool";
+  if (t < 185) return "warm";
+  return "tropical";
+}
+
 // ---------------------------------------------------------------------------
 // Server messages
 // ---------------------------------------------------------------------------
@@ -106,10 +110,23 @@ function onServerMsg(msg: ServerMsg): void {
   switch (msg.type) {
     case "matchStart": {
       inGame = true;
-      world.setMap(msg.mapSeed, msg.passable, msg.terrain ?? [], msg.hq);
+      world.setMap(
+        msg.mapSeed,
+        msg.passable,
+        msg.terrain ?? [],
+        msg.hq,
+        msg.terrainRules,
+        msg.elevation ?? [],
+        msg.moisture ?? [],
+        msg.temperature ?? [],
+      );
       const ownHq = msg.hq[msg.player];
+      document.body.classList.add("in-match");
+      // Re-measure after the HUD claims its own layer; the camera and input
+      // surface must use the inset battlefield dimensions, not the window.
+      resize();
       // Keep the player's HQ centered even when it spawns against a map edge;
-      // the bottom command tray must never hide the opening position.
+      // the command rail never covers the opening position.
       renderer.camera.focusOn(
         ownHq[0] + 0.5,
         ownHq[1] + 0.5,
@@ -123,6 +140,7 @@ function onServerMsg(msg: ServerMsg): void {
       el("result").classList.add("hidden");
       el("dashboard").classList.add("hidden");
       el("spectate-list").classList.add("hidden");
+      document.body.classList.add("in-match");
       el("sidebar").classList.remove("hidden");
       el("topbar").classList.remove("hidden");
       el("turn-ribbon").classList.remove("hidden");
@@ -131,7 +149,10 @@ function onServerMsg(msg: ServerMsg): void {
       el("opponent").textContent = opponentLabel.toUpperCase();
       unitWaypoints.clear();
       prevEntityHp.clear();
-      incomeWindow = [];
+      selectedTile = null;
+      world.clearTileInspection();
+      lastInspectorSig = "";
+      renderTileInspector();
       intel.clear();
       intel.addEntry(0, "Tactical link active. Operation underway.", "info", "LINK");
       lastRenderedLogCount = -1;
@@ -143,6 +164,10 @@ function onServerMsg(msg: ServerMsg): void {
       for (const e of msg.entities) {
         const prevHp = prevEntityHp.get(e.id);
         if (prevHp != null && e.hp < prevHp) {
+          // Floating damage number (U7)
+          const dmg = prevHp - e.hp;
+          const dmgColor = e.owner === 0 ? "#f87171" : "#fbbf24";
+          fx.spawnFloatingText(e.x, e.y, `-${dmg}`, dmgColor);
           // Check for under-attack alert if friendly
           intel.processUnderAttack(msg.turn, e);
 
@@ -189,31 +214,63 @@ function onServerMsg(msg: ServerMsg): void {
         // Use the server's authoritative power numbers (the client's static
         // table is only a fallback for menus/spectate).
         { produced: msg.powerProduced ?? 0, consumed: msg.powerConsumed ?? 0 },
+        msg.steel ?? 0,
+        msg.coal ?? 0,
+        msg.resources,
+        msg.income,
+        msg.resourceTiles ?? [],
+        msg.actionsSpent,
+        msg.actionsCap,
+        msg.round,
       );
 
+      renderTileInspector();
+
+      // The server is authoritative for durable routes. Keep the local map
+      // only as a transient optimistic hint until this diff arrives.
+      for (const e of msg.entities) {
+        if (e.owner !== 0 || !UNIT_KINDS.has(e.kind)) continue;
+        if (e.moveTarget) unitWaypoints.set(e.id, e.moveTarget);
+        else unitWaypoints.delete(e.id);
+      }
+
       for (const ev of msg.events) {
-        // Passive refinery income arrives as `ore_mined` events; track a
-        // rolling per-turn window for the income readout.
-        if (ev.kind === "ore_mined" && ev.amount != null) {
-          incomeWindow.push({ turn: ev.turn, amount: ev.amount });
-        }
         intel.processDiffEvent(ev);
       }
-      incomeWindow = incomeWindow.filter((e) => e.turn >= msg.turn - INCOME_WINDOW_TURNS);
       renderTurnIndicator();
       break;
     }
     case "matchEnd": {
       inGame = false;
       world.result = { winner: msg.winner, reason: msg.reason };
+      lastReplayId = msg.replayId ?? null;
+      // F4: feed the adaptive-difficulty tracker (draws are neutral).
+      if (msg.winner != null) {
+        recordResult(opponentLabel, msg.winner === 0);
+      }
       // A draw arrives with `winner: null`; it must not render as a defeat.
       const title =
         msg.winner === null ? "DRAW" : msg.winner === 0 ? "VICTORY" : "DEFEAT";
       el("result-title").textContent = title;
       el("result-title").className =
         msg.winner === null ? "draw" : msg.winner === 0 ? "win" : "lose";
+      // Victory/defeat emblem (A8).
+      const emblem = el("result-emblem");
+      if (emblem) {
+        emblem.textContent = msg.winner === null ? "=" : msg.winner === 0 ? "\u2713" : "\u2717";
+        emblem.style.borderColor =
+          msg.winner === null ? "var(--gold)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
+        emblem.style.color =
+          msg.winner === null ? "var(--gold-bright)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
+        emblem.style.boxShadow =
+          msg.winner === null
+            ? "0 0 24px var(--gold-glow)"
+            : msg.winner === 0
+              ? "0 0 24px rgba(116,176,138,0.4)"
+              : "0 0 24px rgba(208,120,104,0.4)";
+      }
       el("result-detail").textContent =
-        `${msg.reason} · ${formatTurns(msg.durationTurns)} turns · replay #${msg.replayId ?? "?"}`;
+        `${msg.reason} · ${formatTurns(msg.durationRounds ?? Math.ceil(msg.durationTurns / 2))} rounds · ${formatTurns(msg.durationTurns)} activations · replay #${msg.replayId ?? "?"}`;
       // Plan §8: tell the player their match feeds the trainer's ghost pool.
       el("result-ghost").textContent =
         msg.replayId != null
@@ -222,6 +279,18 @@ function onServerMsg(msg: ServerMsg): void {
       el("overlay").classList.remove("hidden");
       el("lobby").classList.add("hidden");
       el("result").classList.remove("hidden");
+      break;
+    }
+    case "tileInspection": {
+      if (
+        selectedTile
+        && selectedTile[0] === msg.x
+        && selectedTile[1] === msg.y
+      ) {
+        world.applyTileInspection(msg);
+        lastInspectorSig = "";
+        renderTileInspector();
+      }
       break;
     }
     case "commandRejected": {
@@ -245,7 +314,10 @@ function startMatch(which: string, label?: string): void {
   selection = new Set();
   placementMode = null;
   placementCursor = null;
-  incomeWindow = [];
+  selectedTile = null;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
   intel.clear();
   lastRenderedLogCount = -1;
   net.close();
@@ -255,14 +327,24 @@ function startMatch(which: string, label?: string): void {
 
 function showLobby(): void {
   inGame = false;
+  document.body.classList.remove("in-match");
   el("overlay").classList.remove("hidden");
   el("lobby").classList.remove("hidden");
   el("result").classList.add("hidden");
+  const tierHint = el("lobby-tier");
+  if (tierHint) {
+    tierHint.textContent = `Recommended: ${adaptiveTier().toUpperCase()} (from your recent results)`;
+  }
+  document.body.classList.remove("in-match");
   el("sidebar").classList.add("hidden");
   el("topbar").classList.add("hidden");
   el("turn-ribbon").classList.add("hidden");
   el("radar-block").classList.add("hidden");
   el("log").classList.add("hidden");
+  selectedTile = null;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
   el("lobby-status").textContent = "";
 }
 
@@ -271,6 +353,8 @@ function showLobby(): void {
 // ---------------------------------------------------------------------------
 
 function renderTurnIndicator(): void {
+  const round = document.getElementById("round");
+  if (round) round.textContent = String(world.round);
   el("turn").textContent = String(world.turn);
   const ribbon = el("turn-ribbon");
   ribbon.classList.remove("hidden");
@@ -343,12 +427,12 @@ const radarCtx = radarCanvas?.getContext("2d");
 function radarTileAt(ev: MouseEvent): [number, number] | null {
   if (!radarCanvas) return null;
   const r = radarCanvas.getBoundingClientRect();
-  const rx = ev.clientX - r.left;
-  const ry = ev.clientY - r.top;
-  const s = radarCanvas.width / 64;
+  const rx = (ev.clientX - r.left) * (radarCanvas.width / Math.max(1, r.width));
+  const ry = (ev.clientY - r.top) * (radarCanvas.height / Math.max(1, r.height));
+  const s = radarCanvas.width / MAP_SIZE;
   const tx = rx / s;
   const ty = ry / s;
-  if (tx >= 0 && tx < 64 && ty >= 0 && ty < 64) {
+  if (tx >= 0 && tx < MAP_SIZE && ty >= 0 && ty < MAP_SIZE) {
     return [tx, ty];
   }
   return null;
@@ -382,11 +466,25 @@ if (radarCanvas) {
 
 function canvasPos(ev: MouseEvent): [number, number] {
   const r = canvas.getBoundingClientRect();
-  return [ev.clientX - r.left, ev.clientY - r.top];
+  return [
+    (ev.clientX - r.left) * (canvas.width / Math.max(1, r.width)),
+    (ev.clientY - r.top) * (canvas.height / Math.max(1, r.height)),
+  ];
 }
 
 function tileAt(sx: number, sy: number): [number, number] {
   return [Math.floor(renderer.camera.worldX(sx)), Math.floor(renderer.camera.worldY(sy))];
+}
+
+function selectTile(tile: [number, number]): void {
+  if (tile[0] < 0 || tile[0] >= MAP_SIZE || tile[1] < 0 || tile[1] >= MAP_SIZE) return;
+  selectedTile = tile;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
+  if (inGame) {
+    net.send({ type: "inspectTile", x: tile[0], y: tile[1] });
+  }
 }
 
 canvas.addEventListener("mousedown", (ev) => {
@@ -413,6 +511,7 @@ canvas.addEventListener("mousedown", (ev) => {
   if (ev.button === 0) {
     const [tx, ty] = tileAt(sx, sy);
     if (toolMode === "sell") {
+      selectTile([tx, ty]);
       const b = buildingAt(tx, ty);
       if (b && b.kind !== "Hq" && b.owner === 0) {
         sendCommands([sell(b.id)]);
@@ -420,6 +519,7 @@ canvas.addEventListener("mousedown", (ev) => {
       return;
     }
     if (toolMode === "repair") {
+      selectTile([tx, ty]);
       const b = buildingAt(tx, ty);
       if (b && b.hp < b.maxHp && b.owner === 0) {
         sendCommands([repair(b.id)]);
@@ -427,6 +527,7 @@ canvas.addEventListener("mousedown", (ev) => {
       return;
     }
     if (placementMode) {
+      selectTile([tx, ty]);
       if (isBuildingPlacable(placementMode, [tx, ty], world)) {
         sendCommands([placeBuilding(placementMode, [tx, ty])]);
         placementMode = null;
@@ -492,6 +593,9 @@ canvas.addEventListener("mousemove", (ev) => {
 
   if (placementMode && !panning && !dragStart) {
     placementCursor = tileAt(sx, sy);
+  } else if (!panning && !dragStart) {
+    const t = tileAt(sx, sy);
+    hoverTile = t[0] >= 0 && t[0] < MAP_SIZE && t[1] >= 0 && t[1] < MAP_SIZE ? t : null;
   }
 });
 
@@ -526,6 +630,7 @@ function boxSelect(a: [number, number], b: [number, number]): void {
 
 function selectAt(sx: number, sy: number, additive: boolean): void {
   const [tx, ty] = tileAt(sx, sy);
+  selectTile([tx, ty]);
   let bestId: number | null = null;
   let bestDist = Infinity;
 
@@ -568,6 +673,81 @@ canvas.addEventListener("wheel", (ev) => {
 
 canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
+// ---------------------------------------------------------------------------
+// Touch support (U10): basic touch → mouse mapping for mobile play
+// ---------------------------------------------------------------------------
+let touchStart: { x: number; y: number; t: number } | null = null;
+let lastTapTime = 0;
+
+canvas.addEventListener("touchstart", (ev) => {
+  ev.preventDefault();
+  if (ev.touches.length === 0) return;
+  const t = ev.touches[0];
+  const r = canvas.getBoundingClientRect();
+  const sx = t.clientX - r.left;
+  const sy = t.clientY - r.top;
+  touchStart = { x: sx, y: sy, t: performance.now() };
+
+  if (ev.touches.length === 2) {
+    // Two-finger pan
+    panning = true;
+    lastPan = [sx, sy];
+  } else {
+    dragStart = [sx, sy];
+    dragCurrent = [sx, sy];
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (ev) => {
+  ev.preventDefault();
+  if (ev.touches.length === 0) return;
+  const t = ev.touches[0];
+  const r = canvas.getBoundingClientRect();
+  const sx = t.clientX - r.left;
+  const sy = t.clientY - r.top;
+  if (panning && lastPan) {
+    renderer.camera.pan(sx - lastPan[0], sy - lastPan[1], canvas.width, canvas.height);
+    lastPan = [sx, sy];
+  } else if (touchStart) {
+    dragCurrent = [sx, sy];
+  }
+  if (placementMode && !panning) {
+    placementCursor = tileAt(sx, sy);
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchend", (ev) => {
+  ev.preventDefault();
+  panning = false;
+  lastPan = null;
+  if (!touchStart) return;
+  const dt = performance.now() - touchStart.t;
+  const [sx, sy] = [touchStart.x, touchStart.y];
+  touchStart = null;
+  const start = dragStart;
+  dragStart = null;
+  dragCurrent = null;
+  if (!start) return;
+
+  const dist = Math.hypot(sx - start[0], sy - start[1]);
+  if (dist < 8 && dt < 300) {
+    // Quick tap: select / act
+    const now = performance.now();
+    const isDoubleTap = now - lastTapTime < 300;
+    lastTapTime = now;
+    if (isDoubleTap && inGame && world.activePlayer === 0) {
+      // Double-tap = end turn (mobile shortcut)
+      sendCommands([endTurn()]);
+      renderTurnIndicator();
+      return;
+    }
+    selectAt(sx, sy, false);
+  } else if (dist >= 8) {
+    // Drag: box select
+    boxSelect(start, [sx, sy]);
+  }
+}, { passive: false });
+
 // C&C-style control groups: Ctrl+1..9 assigns the current selection, 1..9
 // recalls it. F1..F4 switch the command-sidebar tabs (keyboard-first play).
 const controlGroups = new Map<number, Set<number>>();
@@ -581,6 +761,23 @@ window.addEventListener("keydown", (ev) => {
     lastPanelSig = "";
     renderCommandSidebar();
     if (researchOpen) closeResearch();
+    el("shortcuts-overlay").classList.add("hidden");
+    el("sell-confirm").classList.add("hidden");
+    return;
+  }
+  // ? toggles the keyboard shortcuts overlay.
+  if (ev.key === "?" || (ev.shiftKey && ev.key === "/")) {
+    const overlay = el("shortcuts-overlay");
+    overlay.classList.toggle("hidden");
+    return;
+  }
+  // Space ends the turn (keyboard shortcut for the button).
+  if (ev.key === " " || ev.code === "Space") {
+    ev.preventDefault();
+    if (inGame && world.activePlayer === 0) {
+      sendCommands([endTurn()]);
+      renderTurnIndicator();
+    }
     return;
   }
   if (!inGame) return;
@@ -640,9 +837,9 @@ function initToolAndTabIcons(): void {
   tabIconsInitialized = true;
 
   const repairImg = el("action-repair-img") as HTMLImageElement | null;
-  if (repairImg) repairImg.src = getThumbnailDataUrl("repair", 0);
+  if (repairImg) repairImg.src = getAssetUrl("ui", "repair");
   const sellImg = el("action-sell-img") as HTMLImageElement | null;
-  if (sellImg) sellImg.src = getThumbnailDataUrl("sell", 0);
+  if (sellImg) sellImg.src = getAssetUrl("ui", "sell");
 
   const bImg = el("tab-icon-buildings") as HTMLImageElement | null;
   if (bImg) bImg.src = getThumbnailDataUrl("tab_buildings", 0);
@@ -721,13 +918,32 @@ function initToolAndTabIcons(): void {
         selEntity.owner === 0 &&
         selEntity.kind !== "Hq"
       ) {
-        sendCommands([sell(single!)]);
+        // Sell confirmation dialog (U13): prevent misclicks.
+        const confirm = el("sell-confirm");
+        const confirmText = el("sell-confirm-text");
+        confirmText.textContent = `Sell ${selEntity.kind} for ~${Math.floor((BUILD_COSTS[selEntity.kind]?.ore ?? 0) * 0.5)} ore refund?`;
+        confirm.classList.remove("hidden");
+        el("sell-confirm-yes").onclick = () => {
+          sendCommands([sell(single!)]);
+          confirm.classList.add("hidden");
+        };
+        el("sell-confirm-no").onclick = () => {
+          confirm.classList.add("hidden");
+        };
       } else {
         toolMode = toolMode === "sell" ? null : "sell";
         if (toolMode) placementMode = null;
         lastPanelSig = "";
         renderCommandSidebar();
       }
+    });
+  }
+
+  // Keyboard shortcuts overlay close button.
+  const shortcutsClose = el("shortcuts-close");
+  if (shortcutsClose) {
+    shortcutsClose.addEventListener("click", () => {
+      el("shortcuts-overlay").classList.add("hidden");
     });
   }
 }
@@ -826,7 +1042,7 @@ let lastPanelSig = "";
 
 function cmdButton(
   key: string,
-  cost: number,
+  cost: ResourceBundle,
   onClick: () => void,
   opts: {
     armed?: boolean;
@@ -845,16 +1061,31 @@ function cmdButton(
     <img class="thumb" src="${thumbUrl}" alt="${key}" />
     <span class="label">${displayLabel}</span>
   `;
-  if (cost > 0) {
+  const costLabel = formatResourceCost(cost);
+  if (costLabel) {
     const c = document.createElement("span");
     c.className = "cost";
-    c.textContent = String(cost);
+    c.textContent = costLabel;
     b.appendChild(c);
   }
-  if (world.ore < cost || opts.disabled) {
+  const cannotAfford = !resourceBundleAffordable(world.resources, cost);
+  if (cannotAfford || opts.disabled) {
     b.classList.add("disabled");
-    if (opts.disabledReason) {
-      b.title = opts.disabledReason;
+    b.title = opts.disabledReason ?? (cannotAfford ? "INSUFFICIENT RESOURCES" : "UNAVAILABLE");
+  } else {
+    // Unit/Building stat tooltip: show HP, damage, range, MP, build turns on hover.
+    const stats = UNIT_STATS[key] ?? BUILD_STATS[key];
+    if (stats) {
+      const parts: string[] = [];
+      if (stats.hp) parts.push(`${stats.hp} HP`);
+      if (stats.damage) parts.push(`${stats.damage} DMG`);
+      if (stats.range_tiles) parts.push(`R${stats.range_tiles}`);
+      if (stats.mp) parts.push(`${stats.mp} MP`);
+      if (stats.vision_tiles) parts.push(`${stats.vision_tiles} vis`);
+      if (stats.build_time_turns) parts.push(`${stats.build_time_turns} Turn${stats.build_time_turns === 1 ? "" : "s"}`);
+      if (stats.air) parts.push("AIR");
+      if (stats.aa) parts.push("AA");
+      b.title = parts.join(" · ");
     }
   }
   const pwr = opts.power ?? BUILDING_POWER[key];
@@ -869,6 +1100,14 @@ function cmdButton(
       pTag.textContent = `-${pwr.consumes} PWR`;
       b.appendChild(pTag);
     }
+  }
+  const turns = UNIT_STATS[key]?.build_time_turns ?? BUILD_STATS[key]?.build_time_turns;
+  if (turns != null && turns > 0 && !opts.badge) {
+    const tTag = document.createElement("span");
+    tTag.className = "turns-tag";
+    tTag.textContent = `${turns}T`;
+    tTag.title = `${turns} Turn${turns === 1 ? "" : "s"} to build`;
+    b.appendChild(tTag);
   }
   if (opts.armed) b.classList.add("armed");
   if (opts.badge) {
@@ -885,7 +1124,25 @@ function renderCommandSidebar(): void {
   initToolAndTabIcons();
 
   const single = selectedSingle();
-  const selEntity = single != null ? world.entities.get(single) : null;
+  const movingCount = selectedUnits().filter((id) => world.entities.get(id)?.moveTarget != null).length;
+  const selEntity = single ? world.entities.get(single) : null;
+  const isRepairable = selEntity && BUILDING_KINDS.has(selEntity.kind) && selEntity.owner === 0;
+  const isSellable = selEntity && BUILDING_KINDS.has(selEntity.kind) && selEntity.owner === 0 && selEntity.kind !== "Hq";
+
+  // Actions row
+  const repairBtn = el("action-repair");
+  const sellBtn = el("action-sell");
+  if (repairBtn) {
+    repairBtn.classList.toggle("disabled", !isRepairable);
+    if (toolMode === "repair") repairBtn.classList.add("armed");
+    else repairBtn.classList.remove("armed");
+  }
+  if (sellBtn) {
+    sellBtn.classList.toggle("disabled", !isSellable);
+    if (toolMode === "sell") sellBtn.classList.add("armed");
+    else sellBtn.classList.remove("armed");
+  }
+
   const qsig = selEntity && selEntity.queue ? `${selEntity.progress}/${selEntity.buildTime}` : "";
   const bCounts = `${world.ownBuildings.filter((b) => b.kind === "Barracks").length}-${
     world.ownBuildings.filter((b) => b.kind === "Factory").length
@@ -903,7 +1160,9 @@ function renderCommandSidebar(): void {
     "|" +
     qsig +
     "|" +
-    world.ore +
+    JSON.stringify(world.resources) +
+    "|" +
+    movingCount +
     "|" +
     bCounts +
     "|" +
@@ -922,18 +1181,6 @@ function renderCommandSidebar(): void {
     }
   }
 
-  // Update global tool mode buttons active highlights
-  const repairBtn = el("action-repair");
-  if (repairBtn) {
-    if (toolMode === "repair") repairBtn.classList.add("armed");
-    else repairBtn.classList.remove("armed");
-  }
-  const sellBtn = el("action-sell");
-  if (sellBtn) {
-    if (toolMode === "sell") sellBtn.classList.add("armed");
-    else sellBtn.classList.remove("armed");
-  }
-
   // Selection Card
   const name = el("sel-name");
   const detail = el("sel-detail");
@@ -946,7 +1193,12 @@ function renderCommandSidebar(): void {
     const hpText = selEntity.maxHp > 0 ? `${selEntity.hp} / ${selEntity.maxHp} HP` : "";
     const pwr = BUILDING_POWER[selEntity.kind];
     const pwrText = pwr ? (pwr.produces > 0 ? ` · +${pwr.produces} PWR GEN` : ` · -${pwr.consumes} PWR DRAIN`) : "";
-    detail.textContent = hpText + pwrText + (selectedUnits().length > 1 ? ` · ${selection.size} UNITS` : "");
+    const routeText = selEntity.moveTarget
+      ? ` · ROUTE ${selEntity.moveTarget[0]},${selEntity.moveTarget[1]}`
+      : selEntity.moved
+        ? " · MOVED"
+        : "";
+    detail.textContent = hpText + pwrText + routeText + (selectedUnits().length > 1 ? ` · ${selection.size} UNITS` : "");
     if (selEntity.maxHp > 0) {
       hpwrap.classList.remove("hidden");
       hp.style.width = `${Math.max(0, Math.min(100, (selEntity.hp / selEntity.maxHp) * 100))}%`;
@@ -955,11 +1207,30 @@ function renderCommandSidebar(): void {
     }
     if (selEntity.queue && selEntity.queue.length > 0) {
       queue.classList.remove("hidden");
-      queue.innerHTML =
-        `QUEUE: ${selEntity.queue.join(" → ").toUpperCase()}` +
-        `<div class="queue-bar"><div style="width:${Math.round(
-          (selEntity.buildTime ? selEntity.progress! / selEntity.buildTime : 0) * 100,
-        )}%"></div></div>`;
+      const currentUnit = selEntity.queue[0];
+      const prog = selEntity.progress ?? 0;
+      const total = selEntity.buildTime ?? 1;
+      const pct = Math.max(0, Math.min(100, Math.round((prog / total) * 100)));
+      const turnsLeft = Math.max(0, total - prog);
+      const nextUnits = selEntity.queue.slice(1);
+      const nextStr = nextUnits.length > 0 ? ` · NEXT: ${nextUnits.join(", ").toUpperCase()}` : "";
+      const thumb = getThumbnailDataUrl(currentUnit, 0);
+
+      queue.innerHTML = `
+        <div class="civ-prod-card">
+          <div class="civ-prod-thumb-wrap">
+            <img class="civ-prod-thumb" src="${thumb}" alt="${currentUnit}" />
+            <div class="civ-prod-grey-overlay" style="height:${100 - pct}%">
+              <div class="civ-prod-scanline"></div>
+            </div>
+          </div>
+          <div class="civ-prod-info">
+            <div class="civ-prod-title">PRODUCING: ${currentUnit.toUpperCase()}</div>
+            <div class="civ-prod-sub">${turnsLeft > 0 ? `TURN ${prog + 1} OF ${total} (${turnsLeft}T LEFT)` : `READY NEXT TURN`}${nextStr}</div>
+            <div class="queue-bar"><div style="width:${pct}%"></div></div>
+          </div>
+        </div>
+      `;
     } else {
       queue.classList.add("hidden");
     }
@@ -970,7 +1241,9 @@ function renderCommandSidebar(): void {
       if (e) kinds.set(e.kind, (kinds.get(e.kind) ?? 0) + 1);
     }
     name.textContent = [...kinds.entries()].map(([k, n]) => `${n}× ${k.toUpperCase()}`).join(", ");
-    detail.textContent = "RIGHT-CLICK TO ATTACK-MOVE";
+    detail.textContent = movingCount > 0
+      ? `ROUTE ACTIVE · ${movingCount} UNIT${movingCount === 1 ? "" : "S"}`
+      : "RIGHT-CLICK TO ATTACK-MOVE";
     hpwrap.classList.add("hidden");
     queue.classList.add("hidden");
   } else {
@@ -986,6 +1259,25 @@ function renderCommandSidebar(): void {
   grid.innerHTML = "";
   empty.classList.add("hidden");
 
+  // Durable routes can be cancelled without changing the units' current
+  // position or movement points. This remains visible after a turn boundary
+  // because the destination is part of the server state.
+  const movingUnits = selectedUnits().filter((id) => world.entities.get(id)?.moveTarget != null);
+  if (movingUnits.length > 0) {
+    grid.appendChild(
+      cmdButton(
+        "clear_move",
+        { ore: 0, steel: 0, coal: 0, crystal: 0 },
+        () => {
+          sendCommands([clearMove(movingUnits)]);
+          lastPanelSig = "";
+          renderCommandSidebar();
+        },
+        { label: "Clear Route", badge: `${movingUnits.length} ACTIVE` },
+      ),
+    );
+  }
+
   // Tech Lab selected: a RESEARCH button opens the tech overlay (Civ-style
   // tree, not a one-shot card). The ribbon shows live progress.
   if (selEntity && selEntity.kind === "TechLab" && selEntity.owner === 0) {
@@ -994,7 +1286,7 @@ function renderCommandSidebar(): void {
     grid.appendChild(
       cmdButton(
         "Research",
-        0,
+        { ore: 0, steel: 0, coal: 0, crystal: 0 },
         () => openResearch(),
         {
           armed: false,
@@ -1131,12 +1423,117 @@ function openResearch(): void {
   if (!inGame) return;
   researchOpen = true;
   renderResearch();
+  renderBuildTree();
+  bindResearchTabs();
   el("research-overlay").classList.remove("hidden");
 }
 
 function closeResearch(): void {
   researchOpen = false;
   el("research-overlay").classList.add("hidden");
+}
+
+let researchTabsBound = false;
+function bindResearchTabs(): void {
+  if (researchTabsBound) return;
+  researchTabsBound = true;
+  const tabTech = el("research-tab-tech");
+  const tabBuild = el("research-tab-build");
+  const tree = el("research-tree");
+  const build = el("research-build");
+  const show = (tech: boolean) => {
+    tabTech.classList.toggle("active", tech);
+    tabBuild.classList.toggle("active", !tech);
+    tree.classList.toggle("hidden", !tech);
+    build.classList.toggle("hidden", tech);
+  };
+  tabTech.addEventListener("click", () => show(true));
+  tabBuild.addEventListener("click", () => show(false));
+}
+
+/** U3: build-tree tab — which building produces which units and what gates
+ *  each unit (tech researched, secondary building). Read-only dependency
+ *  reference drawn from the same data the server validates against. */
+function renderBuildTree(): void {
+  const host = el("research-build");
+  host.replaceChildren();
+  const buildOrder = [
+    "Barracks",
+    "Factory",
+    "Airfield",
+    "Refinery",
+    "CrystalRefinery",
+    "PowerPlant",
+    "TechLab",
+    "Radar",
+    "Turret",
+    "TeslaCoil",
+    "AATurret",
+  ];
+  const doneBuildings = new Set(world.ownBuildings.map((b) => b.kind));
+  const researched = new Set(world.research.researched);
+
+  for (const bt of buildOrder) {
+    const node = document.createElement("div");
+    node.className = "build-node";
+    const head = document.createElement("div");
+    head.className = "build-node-head";
+    const thumb = document.createElement("img");
+    thumb.className = "thumb";
+    thumb.src = getThumbnailDataUrl(bt, 0);
+    thumb.alt = bt;
+    const name = document.createElement("span");
+    name.className = "build-node-name";
+    name.textContent = bt.toUpperCase();
+    head.appendChild(thumb);
+    head.appendChild(name);
+    const stats = BUILD_STATS[bt];
+    if (stats) {
+      const s = document.createElement("span");
+      s.className = "build-node-req";
+      const parts: string[] = [];
+      if (stats.hp) parts.push(`${stats.hp} HP`);
+      const req = BUILDING_PREREQS[bt];
+      if (req) parts.push(`requires ${req}`);
+      s.textContent = parts.join(" · ");
+      head.appendChild(s);
+    }
+    node.appendChild(head);
+
+    // Units produced here, with their gates.
+    const produced = Object.entries(UNIT_TREE).filter(([, v]) => v.building === bt);
+    for (const [uk, v] of produced) {
+      const chip = document.createElement("span");
+      chip.className = "build-unit";
+      const uThumb = document.createElement("img");
+      uThumb.className = "thumb";
+      uThumb.src = getThumbnailDataUrl(uk, 0);
+      uThumb.alt = uk;
+      const uName = document.createElement("span");
+      uName.textContent = uk;
+      chip.appendChild(uThumb);
+      chip.appendChild(uName);
+      const gates: string[] = [];
+      if (v.buildingReq && !doneBuildings.has(v.buildingReq)) {
+        gates.push(`needs ${v.buildingReq}`);
+      }
+      if (v.tech && !researched.has(v.tech)) {
+        gates.push(`research ${v.tech}`);
+      }
+      if (gates.length > 0) {
+        const g = document.createElement("span");
+        g.className = gates.some((x) => x.startsWith("research")) ? "gate tech" : "gate";
+        g.textContent = gates.join(", ");
+        chip.appendChild(g);
+      }
+      node.appendChild(chip);
+    }
+    const status = document.createElement("span");
+    status.className = "build-node-req";
+    status.textContent = doneBuildings.has(bt) ? "✓ BUILT" : "";
+    head.appendChild(status);
+    host.appendChild(node);
+  }
 }
 
 /** The research tree ordering, tier by tier (mirrors tech.rs). */
@@ -1233,9 +1630,20 @@ function renderLog(): void {
   }
   lastRenderedLogCount = intel.entries.length;
   log.innerHTML = "";
+  const GLYPHS: Record<string, string> = {
+    info: "◆",
+    prod: "▲",
+    warn: "⚠",
+    danger: "✖",
+    kill: "✓",
+  };
   for (const entry of intel.entries) {
     const row = document.createElement("div");
-    row.className = "log-entry";
+    row.className = `log-entry log-entry-${entry.level}`;
+
+    const glyph = document.createElement("span");
+    glyph.className = "log-glyph";
+    glyph.textContent = GLYPHS[entry.level] ?? "•";
 
     const timeSpan = document.createElement("span");
     timeSpan.className = "log-time";
@@ -1249,6 +1657,7 @@ function renderLog(): void {
     msgSpan.className = `log-msg log-msg-${entry.level}`;
     msgSpan.textContent = entry.text;
 
+    row.appendChild(glyph);
     row.appendChild(timeSpan);
     row.appendChild(tagSpan);
     row.appendChild(msgSpan);
@@ -1261,19 +1670,199 @@ function formatTurns(turns: number): string {
   return String(Math.max(0, turns));
 }
 
+function renderResourceReadouts(): void {
+  el("ore").textContent = String(world.resources.ore);
+  el("steel").textContent = String(world.resources.steel);
+  el("coal").textContent = String(world.resources.coal);
+  el("crystal").textContent = String(world.resources.crystal);
+  const income = formatResourceCost(world.income);
+  el("income").textContent = income ? `+${income}/turn` : "";
+
+  // Action budget bar (F11): show how many actions remain this turn.
+  const budgetBar = el("action-budget-bar");
+  if (budgetBar) {
+    if (inGame && world.activePlayer === 0) {
+      budgetBar.classList.remove("hidden");
+      const spent = world.budgetSpent ?? 0;
+      const cap = world.budgetCap ?? 16;
+      const pct = Math.max(0, Math.min(100, ((cap - spent) / cap) * 100));
+      el("action-budget-fill").style.width = `${pct}%`;
+      el("action-budget-fill").style.background =
+        pct < 20 ? "var(--red)" : pct < 50 ? "var(--gold-bright)" : "var(--gold)";
+    } else {
+      budgetBar.classList.add("hidden");
+    }
+  }
+}
+
+function inspectorLine(parent: HTMLElement, key: string, value: string, className = ""): void {
+  const row = document.createElement("div");
+  row.className = "inspector-row";
+  const keyNode = document.createElement("span");
+  keyNode.className = "inspector-key";
+  keyNode.textContent = key;
+  const valueNode = document.createElement("span");
+  valueNode.className = `inspector-value${className ? ` ${className}` : ""}`;
+  valueNode.textContent = value;
+  row.append(keyNode, valueNode);
+  parent.appendChild(row);
+}
+
+function inspectorEmpty(parent: HTMLElement, text: string): void {
+  const node = document.createElement("div");
+  node.className = "inspector-empty";
+  node.textContent = text;
+  parent.appendChild(node);
+}
+
+/** Render the selected tile's progressive-disclosure report. */
+function renderTileInspector(): void {
+  const panel = document.getElementById("inspector");
+  if (!panel) return;
+  if (!inGame || !selectedTile) {
+    panel.classList.add("hidden");
+    lastInspectorSig = "";
+    return;
+  }
+
+  const info = inspectionForTile(world, selectedTile[0], selectedTile[1], selection);
+  const sig = `${selectedTile[0]},${selectedTile[1]}|${world.turn}|${JSON.stringify(info)}|${JSON.stringify([...selection].sort((a, b) => a - b))}`;
+  if (sig === lastInspectorSig) return;
+  lastInspectorSig = sig;
+  panel.classList.remove("hidden");
+
+  el("inspector-coords").textContent = `TILE ${info.x},${info.y}`;
+  el("inspector-visibility").textContent = `${info.visibility.toUpperCase()} · ${info.authoritative ? "SERVER VERIFIED" : "LOCAL PREVIEW"}`;
+  const inspectorIcon = document.getElementById("inspector-icon") as HTMLImageElement | null;
+  if (inspectorIcon) {
+    inspectorIcon.src = info.resource
+      ? getAssetUrl("resources", info.resource.resource)
+      : info.terrain
+        ? getAssetUrl("terrain", info.terrain.kind)
+        : getAssetUrl("ui", "inspect");
+  }
+  el("inspector-visibility").className = `inspector-visibility${info.authoritative ? " inspector-verified" : ""}`;
+
+  const terrain = el("inspector-terrain");
+  terrain.replaceChildren();
+  if (!info.terrain) {
+    inspectorEmpty(terrain, "Terrain and movement data are hidden. Scout this tile to reveal it.");
+  } else {
+    inspectorLine(terrain, "type", `${info.terrain.label} · ${info.terrain.tacticalTag}`);
+    if (info.elevation != null || info.moisture != null) {
+      const temp =
+        info.temperature == null ? "" : ` · ${tempLabel(info.temperature)}`;
+      inspectorLine(
+        terrain,
+        "landform",
+        `elevation ${info.elevation ?? "—"} · moisture ${info.moisture ?? "—"}${temp}`,
+      );
+    }
+    inspectorLine(
+      terrain,
+      "movement",
+      info.terrain.passable ? `×${info.terrain.moveMultiplier} entry cost` : "impassable",
+      info.terrain.passable ? "inspector-good" : "inspector-bad",
+    );
+    if (info.terrain.defenseReduction > 0) {
+      inspectorLine(terrain, "defense", `-${info.terrain.defenseReduction}% incoming damage`, "inspector-good");
+    }
+    const movement = selection.size > 0
+      ? info.movement.filter((entry) => selection.has(entry.unitId))
+      : info.movement.slice(0, 6);
+    if (movement.length === 0) {
+      inspectorEmpty(terrain, "Select a unit to compare its movement points with this tile.");
+    } else {
+      for (const entry of movement) {
+        inspectorLine(
+          terrain,
+          `#${entry.unitId} ${entry.unitKind}`,
+          `${entry.movePoints} MP · ${entry.terrainCost} to enter · ${entry.canEnter ? "can enter" : "blocked"}`,
+          entry.canEnter ? "inspector-good" : "inspector-bad",
+        );
+      }
+    }
+  }
+
+  const resource = el("inspector-resource");
+  resource.replaceChildren();
+  if (!info.resource) {
+    inspectorEmpty(resource, info.visibility === "unexplored" ? "No deposit data — this tile has not been scouted." : "No known deposit on this tile.");
+  } else {
+    const richness = ["", "Poor", "Standard", "Rich"][Math.max(0, Math.min(3, info.resource.richness))] || "Unknown";
+    inspectorLine(resource, "deposit", `${info.resource.resource} · ${richness}`);
+    const yieldText = info.resource.yieldPerTurn != null ? `+${info.resource.yieldPerTurn}/turn` : "yield on claim";
+    inspectorLine(resource, "supply", `INFINITE · ${yieldText}`, "inspector-good");
+    if (info.resource.refineryOwner != null) {
+      inspectorLine(resource, "refinery", `Player ${info.resource.refineryOwner} · ${yieldText}`, "inspector-good");
+    } else {
+      inspectorLine(resource, "refinery", "Unclaimed · build directly on this tile", "inspector-warn");
+    }
+  }
+
+  const occupants = el("inspector-occupants");
+  occupants.replaceChildren();
+  if (info.occupants.length === 0) {
+    inspectorEmpty(occupants, "No known occupants.");
+  } else {
+    for (const occupant of info.occupants) {
+      const side = occupant.owner === 0 ? "friendly" : occupant.stale ? `enemy · seen ${occupant.stale}t ago` : "enemy";
+      const hp = occupant.maxHp > 0 ? ` · ${occupant.hp}/${occupant.maxHp} HP` : "";
+      inspectorLine(occupants, `#${occupant.id}`, `${occupant.kind} · ${side}${hp}`, occupant.owner === 0 ? "inspector-good" : occupant.stale ? "" : "inspector-warn");
+    }
+  }
+
+  const routes = el("inspector-routes");
+  routes.replaceChildren();
+  if (info.routeTargets.length === 0) {
+    inspectorEmpty(routes, "No durable routes currently target from this tile.");
+  } else {
+    for (const route of info.routeTargets) {
+      inspectorLine(routes, `unit #${route.id}`, `destination ${route.target[0]},${route.target[1]}`);
+    }
+  }
+
+  const placement = el("inspector-placement");
+  placement.replaceChildren();
+  if (!info.placement.known) {
+    inspectorEmpty(placement, "Placement facts are hidden until this tile is scouted.");
+  } else {
+    inspectorLine(placement, "terrain", info.placement.passable ? "Passable" : "Impassable", info.placement.passable ? "inspector-good" : "inspector-bad");
+    if (info.placement.occupiedByBuilding) inspectorLine(placement, "occupied", "Building footprint", "inspector-bad");
+    else if (info.placement.occupiedByUnit) inspectorLine(placement, "occupied", "Unit footprint", "inspector-bad");
+    else inspectorLine(placement, "occupied", "Clear", "inspector-good");
+    inspectorLine(placement, "base radius", info.placement.withinBaseRadius ? "Within build radius" : "Outside build radius", info.placement.withinBaseRadius ? "inspector-good" : "inspector-warn");
+    inspectorLine(placement, "structure", info.placement.structureSiteAvailable ? "Site available" : "Not available", info.placement.structureSiteAvailable ? "inspector-good" : "inspector-warn");
+    inspectorLine(placement, "refinery", info.placement.refinerySiteAvailable ? "Deposit claim available" : "No legal claim", info.placement.refinerySiteAvailable ? "inspector-good" : "inspector-warn");
+  }
+}
+
+function initTileInspector(): void {
+  document.getElementById("inspector-close")?.addEventListener("click", () => {
+    selectedTile = null;
+    world.clearTileInspection();
+    lastInspectorSig = "";
+    renderTileInspector();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Main Render Loop & Menu Battle Theater
 // ---------------------------------------------------------------------------
 
 function resize(): void {
-  // Fall back to layout metrics (and a sane floor) so a viewport that starts
-  // hidden/zero-sized never freezes the canvas at 0×0.
-  const w = window.innerWidth || document.documentElement.clientWidth || 800;
-  const h = window.innerHeight || document.documentElement.clientHeight || 600;
+  // The canvas is an inset battlefield while a match is active and a full
+  // window cinematic surface in the menu. Size its backing store from the
+  // actual CSS box so camera math and pointer coordinates share one viewport.
+  const fallbackW = window.innerWidth || document.documentElement.clientWidth || 800;
+  const fallbackH = window.innerHeight || document.documentElement.clientHeight || 600;
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, Math.floor(rect.width || fallbackW));
+  const h = Math.max(1, Math.floor(rect.height || fallbackH));
   canvas.width = w;
   canvas.height = h;
-  renderer.camera.setViewport(canvas.width, canvas.height);
-  menuRenderer.camera.setViewport(canvas.width, canvas.height);
+  renderer.camera.setViewport(w, h);
+  menuRenderer.camera.setViewport(w, h);
   spectate.renderer.camera.setViewport(w, h);
 }
 window.addEventListener("resize", resize);
@@ -1284,101 +1873,80 @@ document.addEventListener("visibilitychange", () => {
 });
 resize();
 
-function initMenuBattle(): void {
-  menuWorld.setMap(42, new Array(64 * 64).fill(true), [], [[10, 10], [54, 54]]);
-  menuWorld.oreTiles.set("18,18", { x: 18, y: 18, amount: 600 });
-  menuWorld.oreTiles.set("46,46", { x: 46, y: 46, amount: 600 });
-  menuWorld.oreTiles.set("32,32", { x: 32, y: 32, amount: 800 });
-  menuWorld.visible = new Set(Array.from({ length: 64 * 64 }, (_, i) => i));
-
-  demoUnits = [
-    // P0 Blue base & army
-    { id: 1, kind: "Hq", owner: 0, x: 10.5, y: 10.5, targetX: 10.5, targetY: 10.5, speed: 0, fireCooldown: 999, maxCooldown: 999, hp: 1500, maxHp: 1500 },
-    { id: 2, kind: "Refinery", owner: 0, x: 14.5, y: 10.5, targetX: 14.5, targetY: 10.5, speed: 0, fireCooldown: 999, maxCooldown: 999, hp: 400, maxHp: 400 },
-    { id: 3, kind: "Factory", owner: 0, x: 10.5, y: 14.5, targetX: 10.5, targetY: 14.5, speed: 0, fireCooldown: 999, maxCooldown: 999, hp: 350, maxHp: 350 },
-    { id: 4, kind: "Turret", owner: 0, x: 22.5, y: 18.5, targetX: 22.5, targetY: 18.5, speed: 0, fireCooldown: 30, maxCooldown: 40, hp: 200, maxHp: 200 },
-    { id: 6, kind: "Tank", owner: 0, x: 26.5, y: 26.5, targetX: 34.5, targetY: 30.5, speed: 1.8, fireCooldown: 15, maxCooldown: 35, hp: 260, maxHp: 260 },
-    { id: 7, kind: "Tank", owner: 0, x: 25.5, y: 29.5, targetX: 33.5, targetY: 33.5, speed: 1.8, fireCooldown: 25, maxCooldown: 35, hp: 260, maxHp: 260 },
-    { id: 8, kind: "Artillery", owner: 0, x: 20.5, y: 27.5, targetX: 24.5, targetY: 27.5, speed: 1.0, fireCooldown: 40, maxCooldown: 60, hp: 120, maxHp: 120 },
-    { id: 9, kind: "Infantry", owner: 0, x: 27.5, y: 24.5, targetX: 32.5, targetY: 28.5, speed: 2.2, fireCooldown: 10, maxCooldown: 20, hp: 90, maxHp: 90 },
-    { id: 10, kind: "Infantry", owner: 0, x: 28.5, y: 25.5, targetX: 33.5, targetY: 29.5, speed: 2.2, fireCooldown: 15, maxCooldown: 20, hp: 90, maxHp: 90 },
-
-    // P1 Red base & army
-    { id: 11, kind: "Hq", owner: 1, x: 53.5, y: 53.5, targetX: 53.5, targetY: 53.5, speed: 0, fireCooldown: 999, maxCooldown: 999, hp: 1500, maxHp: 1500 },
-    { id: 12, kind: "Refinery", owner: 1, x: 49.5, y: 53.5, targetX: 49.5, targetY: 53.5, speed: 0, fireCooldown: 999, maxCooldown: 999, hp: 400, maxHp: 400 },
-    { id: 13, kind: "Turret", owner: 1, x: 41.5, y: 45.5, targetX: 41.5, targetY: 45.5, speed: 0, fireCooldown: 20, maxCooldown: 40, hp: 200, maxHp: 200 },
-    { id: 15, kind: "Tank", owner: 1, x: 37.5, y: 33.5, targetX: 29.5, targetY: 28.5, speed: 1.8, fireCooldown: 10, maxCooldown: 35, hp: 260, maxHp: 260 },
-    { id: 16, kind: "Tank", owner: 1, x: 38.5, y: 30.5, targetX: 30.5, targetY: 26.5, speed: 1.8, fireCooldown: 20, maxCooldown: 35, hp: 260, maxHp: 260 },
-    { id: 17, kind: "Artillery", owner: 1, x: 43.5, y: 35.5, targetX: 40.5, targetY: 35.5, speed: 1.0, fireCooldown: 30, maxCooldown: 60, hp: 120, maxHp: 120 },
-    { id: 18, kind: "Infantry", owner: 1, x: 36.5, y: 35.5, targetX: 31.5, targetY: 31.5, speed: 2.2, fireCooldown: 5, maxCooldown: 20, hp: 90, maxHp: 90 },
-    { id: 19, kind: "Infantry", owner: 1, x: 35.5, y: 36.5, targetX: 30.5, targetY: 32.5, speed: 2.2, fireCooldown: 12, maxCooldown: 20, hp: 90, maxHp: 90 },
-  ];
-
-  menuInit = true;
-}
-
-function updateMenuBattle(dtSec: number): void {
-  demoTime += dtSec;
-
-  // Advance units on patrol/skirmish paths
-  for (const u of demoUnits) {
-    if (u.speed > 0) {
-      const dx = u.targetX - u.x;
-      const dy = u.targetY - u.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > 0.15) {
-        const moveDist = Math.min(dist, u.speed * dtSec);
-        u.x += (dx / dist) * moveDist;
-        u.y += (dy / dist) * moveDist;
-      } else {
-        // Combat units skirmish back and forth in center
-        const minX = u.owner === 0 ? 25 : 34;
-        const maxX = u.owner === 0 ? 32 : 42;
-        const minY = 26;
-        const maxY = 36;
-        u.targetX = minX + Math.random() * (maxX - minX);
-        u.targetY = minY + Math.random() * (maxY - minY);
+/** Deterministic cosmetic terrain for the menu backdrop: low-frequency
+ *  climate noise (moisture/elevation/temperature) condensed into biome
+ *  patches, so the lobby shows off the real biome tiles. Cosmetic only —
+ *  live matches always use the server's authoritative generator. */
+function generateDemoTerrain(seed: number): { terrain: string[]; passable: boolean[] } {
+  const terrain: string[] = new Array(MAP_TILES).fill("Plains");
+  const passable: boolean[] = new Array(MAP_TILES).fill(true);
+  const hash = (x: number, y: number, salt: number): number => {
+    let z = (x * 374761393 + y * 668265263 + salt * 1442695040888963407) ^ (seed >>> 0);
+    z = (z ^ (z >> 13)) * 1274126143;
+    return (z ^ (z >> 16)) >>> 0;
+  };
+  const noise = (x: number, y: number, salt: number): number => {
+    // Bilinear-interpolated lattice noise for smooth patches.
+    const cell = Math.max(4, Math.floor(MAP_SIZE / 16));
+    const gx = Math.floor(x / cell);
+    const gy = Math.floor(y / cell);
+    const fx = (x - gx * cell) / cell;
+    const fy = (y - gy * cell) / cell;
+    const a = hash(gx, gy, salt);
+    const b = hash(gx + 1, gy, salt);
+    const c = hash(gx, gy + 1, salt);
+    const d = hash(gx + 1, gy + 1, salt);
+    const top = a + (b - a) * fx;
+    const bot = c + (d - c) * fx;
+    return ((top + (bot - top) * fy) >>> 8) % 256;
+  };
+  // A river channel across the middle with banks.
+  const riverY = (x: number): number => MAP_SIZE / 2 + Math.round(Math.sin(x / 14) * 10);
+  for (let y = 0; y < MAP_SIZE; y++) {
+    for (let x = 0; x < MAP_SIZE; x++) {
+      const idx = y * MAP_SIZE + x;
+      if (Math.abs(y - riverY(x)) <= 1) {
+        terrain[idx] = "River";
+        continue;
       }
-    }
-
-    // Combat shooting
-    u.fireCooldown -= dtSec * 10;
-    if (u.fireCooldown <= 0) {
-      u.fireCooldown = u.maxCooldown * (0.8 + Math.random() * 0.4);
-      const enemy = demoUnits.find((other) => other.owner !== u.owner && Math.hypot(other.x - u.x, other.y - u.y) < 10);
-      if (enemy) {
-        const projKind = u.kind === "Artillery" ? "artillery" : u.kind === "Tank" ? "shell" : u.kind === "Turret" ? "laser" : "bullet";
-        const projColor = u.owner === 0 ? "#7899a2" : "#b86d5d";
-        fx.spawnAttack(u.x, u.y, enemy.x, enemy.y, projKind, projColor);
-        fx.recordUnitFiring(u.id, animClock());
-      }
+      const elev = noise(x, y, 0x11);
+      const moist = noise(x, y, 0x22);
+      const temp = 40 + (32 - Math.abs(y - 32)) * 5 + (hash(x, y, 0x33) % 40) - 20;
+      if (elev > 205) terrain[idx] = "Mountain";
+      else if (elev > 175 && moist < 140) terrain[idx] = "Hills";
+      else if (moist > 200 && temp > 130) terrain[idx] = "Swamp";
+      else if (moist < 70 && temp > 90) terrain[idx] = "Desert";
+      else if (moist > 150) terrain[idx] = "Forest";
+      else terrain[idx] = "Plains";
+      passable[idx] = !["Mountain"].includes(terrain[idx]);
     }
   }
+  // Two lakes.
+  for (let y = 16; y < 40; y++) {
+    for (let x = 16; x < 40; x++) {
+      if ((x - 28) ** 2 + (y - 28) ** 2 < 88) terrain[y * MAP_SIZE + x] = "Water";
+    }
+  }
+  for (let y = 88; y < 116; y++) {
+    for (let x = 92; x < 120; x++) {
+      if ((x - 105) ** 2 + (y - 102) ** 2 < 104) terrain[y * MAP_SIZE + x] = "Water";
+    }
+  }
+  return { terrain, passable };
+}
 
-  // Sync with menuWorld entities
-  const entities = demoUnits.map((u) => ({
-    id: u.id,
-    kind: u.kind,
-    owner: u.owner,
-    x: u.x,
-    y: u.y,
-    hp: u.hp,
-    maxHp: u.maxHp,
-  }));
-
-  menuWorld.applyDiff(
-    menuWorld.turn + 1,
-    0,
-    500,
-    0,
-    { points: 0, researching: null, researched: [] },
-    entities,
-    [{ x: 18, y: 18, amount: 600 }, { x: 46, y: 46, amount: 600 }, { x: 32, y: 32, amount: 800 }],
-    [],
-    Array.from({ length: 64 * 64 }, (_, i) => i),
-    [],
-  );
-  menuWorld.turn += 1;
+function initMenuTour(): void {
+  // The menu is a deterministic map tour rather than a fake combat match.
+  const seed = 42;
+  const demo = generateDemoTerrain(seed);
+  menuWorld.setMap(seed, demo.passable, demo.terrain, [[20, 20], [108, 108]]);
+  menuWorld.resourceTiles.clear();
+  menuWorld.resourceTiles.set("28,20", { x: 28, y: 20, resource: "Ore", amount: 600, richness: 3, infinite: true });
+  menuWorld.resourceTiles.set("99,108", { x: 99, y: 108, resource: "Steel", amount: 500, richness: 2, infinite: true });
+  menuWorld.resourceTiles.set("64,64", { x: 64, y: 64, resource: "Coal", amount: 700, richness: 2, infinite: true });
+  menuWorld.visible = new Set(Array.from({ length: MAP_TILES }, (_, i) => i));
+  menuWorld.explored = new Set(menuWorld.visible);
+  menuInit = true;
 }
 
 let lastFrame = performance.now();
@@ -1415,21 +1983,24 @@ function frame(ts: number): void {
     }
     el("opponent").textContent = "SPECTATING REPLAY";
     el("ore").textContent = `${spectate.score0} · ${spectate.score1}`;
+    el("steel").textContent = "—";
+    el("coal").textContent = "—";
+    el("crystal").textContent = "—";
+    el("income").textContent = "";
     el("turn").textContent = String(spectate.currentTurn);
     requestAnimationFrame(frame);
     return;
   }
 
   if (!inGame) {
-    // Menu background simulation only (no radar on menu movie)
-    if (!menuInit) initMenuBattle();
-    updateMenuBattle(dtSec);
-
-    // Zoom in on the central battlefield action with smooth cinematic camera orbit
-    const sweepAngle = demoTime * 0.12;
-    const sweepX = 31 + Math.cos(sweepAngle) * 5;
-    const sweepY = 30 + Math.sin(sweepAngle) * 4;
-    menuRenderer.camera.focusOn(sweepX, sweepY, 30, canvas.width, canvas.height);
+    // Slow deterministic map tour: the menu shows terrain and resources
+    // without a fake combat loop stealing focus from the actual game.
+    if (!menuInit) initMenuTour();
+    demoTime += dtSec;
+    const sweepAngle = demoTime * 0.035;
+    const sweepX = 64 + Math.cos(sweepAngle) * 38;
+    const sweepY = 64 + Math.sin(sweepAngle * 0.83) * 32;
+    menuRenderer.camera.focusOn(sweepX, sweepY, 9, canvas.width, canvas.height);
 
     menuRenderer.draw(ctx, menuWorld, new Set(), canvas.width, canvas.height);
   } else {
@@ -1443,8 +2014,10 @@ function frame(ts: number): void {
 
     renderer.draw(ctx, world, selection, canvas.width, canvas.height, {
       waypoints: unitWaypoints,
+      selectedTile,
       placementMode,
       placementCursor,
+      hoverTile,
     });
 
     // Draw live Radar Surveillance in Command Sidebar
@@ -1463,9 +2036,7 @@ function frame(ts: number): void {
       ctx.setLineDash([]);
     }
 
-    el("ore").textContent = String(world.ore);
-    const sumIncome = incomeWindow.reduce((acc, c) => acc + c.amount, 0);
-    el("income").textContent = sumIncome > 0 ? `+${sumIncome}/turn` : "";
+    renderResourceReadouts();
 
     const pwr = world.ownPower;
     el("power-used").textContent = String(pwr.consumed);
@@ -1481,6 +2052,7 @@ function frame(ts: number): void {
     intel.processPowerStatus(world.turn, pwr.produced, pwr.consumed);
 
     renderCommandSidebar();
+    renderTileInspector();
     renderLog();
   }
 
@@ -1552,6 +2124,7 @@ document.querySelectorAll<HTMLButtonElement>("[data-opp]").forEach((btn) => {
   btn.addEventListener("click", () => startMatch(btn.dataset.opp!, btn.dataset.label));
 });
 initDashboard();
+initTileInspector();
 initToolAndTabIcons();
 spectate.init();
 void initOpponentPicker();
@@ -1559,5 +2132,70 @@ void initOpponentPicker();
 el("again").addEventListener("click", () => {
   showLobby();
 });
+
+// F4: adaptive difficulty. Remember recent match results locally and pick a
+// tier that keeps the challenge fair: 3 wins in the last 4 → step up,
+// losing most of the last 4 → step down.
+interface RecordEntry {
+  tier: string;
+  won: boolean;
+}
+function recordResult(tier: string, won: boolean): void {
+  try {
+    const raw = localStorage.getItem("crucible.record");
+    const list: RecordEntry[] = raw ? (JSON.parse(raw) as RecordEntry[]) : [];
+    list.push({ tier, won });
+    while (list.length > 24) list.shift();
+    localStorage.setItem("crucible.record", JSON.stringify(list));
+  } catch {
+    /* storage unavailable (private mode) — skip */
+  }
+}
+function adaptiveTier(): string {
+  try {
+    const raw = localStorage.getItem("crucible.record");
+    if (!raw) return "medium";
+    const list: RecordEntry[] = JSON.parse(raw) as RecordEntry[];
+    const recent = list.slice(-4);
+    if (recent.length === 0) return "medium";
+    const wins = recent.filter((r) => r.won).length;
+    if (wins >= 3) return "hard";
+    if (wins === 0 && recent.length >= 3) return "easy";
+    return "medium";
+  } catch {
+    return "medium";
+  }
+}
+const adaptiveBtn = el("adaptive-btn");
+if (adaptiveBtn) {
+  adaptiveBtn.addEventListener("click", () => {
+    const tier = adaptiveTier();
+    startMatch(tier, tier);
+  });
+}
+
+// F13: replay sharing via URL. The result screen offers a shareable link;
+// opening `?replay=N` drops the player straight into the spectate view.
+let lastReplayId: number | null = null;
+const shareBtn = el("share-replay");
+if (shareBtn) {
+  shareBtn.addEventListener("click", async () => {
+    if (lastReplayId == null) return;
+    const url = `${location.origin}${location.pathname}?replay=${lastReplayId}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      shareBtn.textContent = "COPIED ✓";
+      setTimeout(() => {
+        shareBtn.textContent = "Copy Replay Link";
+      }, 1800);
+    } catch {
+      window.prompt("Copy this replay link:", url);
+    }
+  });
+}
+const replayParam = new URLSearchParams(location.search).get("replay");
+if (replayParam != null && /^\d+$/.test(replayParam)) {
+  void spectate.loadReplay(Number(replayParam));
+}
 
 requestAnimationFrame(frame);

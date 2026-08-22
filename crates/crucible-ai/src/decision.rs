@@ -8,6 +8,7 @@
 //! The caller appends [`Command::EndTurn`] (see `bot.rs` for the convention);
 //! this layer only produces the action commands.
 
+use crucible_sim::map::MAP_SIZE;
 use crucible_sim::{
     tech::{prereqs_met, tech_info, TechId},
     tiles::chebyshev,
@@ -20,36 +21,54 @@ use crate::network::{
 };
 use crate::scripted::{combat_unit_ids, find_build_tile};
 
-const BUILD_TYPES: [BuildingType; BUILD_OUT] = [
+/// Learned build action slots, kept exhaustive with the simulation's
+/// non-HQ building roster. The server still validates every placement.
+pub const LEARNED_BUILD_TYPES: [BuildingType; BUILD_OUT] = [
+    BuildingType::PowerPlant,
     BuildingType::Refinery,
+    BuildingType::CrystalRefinery,
     BuildingType::Barracks,
     BuildingType::Factory,
     BuildingType::TechLab,
-    BuildingType::Turret,
     BuildingType::Airfield,
     BuildingType::Radar,
     BuildingType::TeslaCoil,
+    BuildingType::Turret,
+    BuildingType::AATurret,
 ];
-const TRAIN_TYPES: [UnitType; TRAIN_OUT] = [
+/// Learned train action slots, kept exhaustive with the simulation roster.
+pub const LEARNED_TRAIN_TYPES: [UnitType; TRAIN_OUT] = [
     UnitType::Infantry,
+    UnitType::Scout,
+    UnitType::RocketTrooper,
     UnitType::Tank,
     UnitType::Artillery,
     UnitType::MammothTank,
     UnitType::Gunship,
     UnitType::Interceptor,
+    UnitType::SamLauncher,
 ];
-/// The four research actions the tech head can pick (schema v7: the old
-/// damage/hp/range upgrades became technologies). The network scores them;
-/// the decision layer masks the illegal ones.
-const TECH_TYPES: [TechId; TECH_OUT] = [
+/// The full 10-technology action space. The network scores each; the
+/// decision layer masks the illegal ones.
+/// Learned research action slots, kept exhaustive with the tech tree.
+pub const LEARNED_TECH_TYPES: [TechId; TECH_OUT] = [
     TechId::HighExplosive,
     TechId::CompositeArmor,
     TechId::TargetingOptics,
     TechId::EfficientRefining,
+    TechId::RocketPropulsion,
+    TechId::TitaniumAlloys,
+    TechId::AerialSuperiority,
+    TechId::Superconductors,
+    TechId::CrystalNanotech,
+    TechId::AdvancedBallistics,
 ];
 
-/// Actions only fire when their winning score clears this threshold.
-const THRESHOLD: f32 = 0.0;
+/// Actions fire when their winning score clears this threshold. A slightly
+/// negative threshold lets a random (Xavier-initialized) genome still produce
+/// build/train commands instead of sitting idle, which is what lets the ES
+/// trainer bootstrap from a cold start.
+const THRESHOLD: f32 = -0.05;
 
 /// Whether the army head should act at all this turn.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,21 +113,24 @@ pub fn decide(
     let mut cmds = Vec::new();
 
     // --- Build head ---------------------------------------------------------
+    // The AI can issue up to 2 build commands per turn (the action budget
+    // allows 16), sorted by score. This lets it build economy + defense
+    // in the same turn rather than alternating one at a time.
     let build_base = 0;
-    let mut best_build: Option<(f32, usize)> = None;
+    let mut build_candidates: Vec<(f32, usize)> = Vec::new();
     for i in 0..BUILD_OUT {
-        let btype = BUILD_TYPES[i];
+        let btype = LEARNED_BUILD_TYPES[i];
         if build_allowed(game, player, btype) {
             let s = out[build_base + i];
-            if s > THRESHOLD && best_build.is_none_or(|(bs, _)| s > bs) {
-                best_build = Some((s, i));
+            if s > THRESHOLD {
+                build_candidates.push((s, i));
             }
         }
     }
-    if let Some((_, i)) = best_build {
-        let btype = BUILD_TYPES[i];
+    build_candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, i) in build_candidates.into_iter().take(2) {
+        let btype = LEARNED_BUILD_TYPES[i];
         if let Some(pref) = build_preferred(game, player, btype) {
-            // An empty plan: this is the batch's first placement.
             if let Some(tile) = find_build_tile(game, player, btype, pref, &Default::default()) {
                 cmds.push(Command::PlaceBuilding {
                     player,
@@ -120,8 +142,8 @@ pub fn decide(
     }
 
     // --- Power management (rule, not learned) ------------------------------
-    // The learned build head has no PowerPlant slot, so a deterministic rule
-    // keeps the AI from being permanently crippled by low power: production
+    // A deterministic safety rule keeps the AI from being permanently
+    // crippled by low power: production
     // runs at half speed once consumption exceeds production, and humans can
     // escape that by building a PowerPlant. The AI gets the same escape hatch.
     // Fires only when one more plant closes the gap, so it never over-spams.
@@ -149,19 +171,21 @@ pub fn decide(
     }
 
     // --- Train head ---------------------------------------------------------
+    // Issue up to 2 train commands per turn, sorted by score.
     let train_base = BUILD_OUT;
-    let mut best_train: Option<(f32, usize)> = None;
+    let mut train_candidates: Vec<(f32, usize)> = Vec::new();
     for i in 0..TRAIN_OUT {
-        let utype = TRAIN_TYPES[i];
+        let utype = LEARNED_TRAIN_TYPES[i];
         if train_allowed(game, player, utype) {
             let s = out[train_base + i];
-            if s > THRESHOLD && best_train.is_none_or(|(bs, _)| s > bs) {
-                best_train = Some((s, i));
+            if s > THRESHOLD {
+                train_candidates.push((s, i));
             }
         }
     }
-    if let Some((_, i)) = best_train {
-        let utype = TRAIN_TYPES[i];
+    train_candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, i) in train_candidates.into_iter().take(2) {
+        let utype = LEARNED_TRAIN_TYPES[i];
         let producer = producer_for(utype);
         if let Some(b) = game.buildings.iter().find(|b| {
             b.owner == player && b.btype == producer && b.queue.len() < game.config.max_queue
@@ -218,7 +242,11 @@ pub fn decide(
                         ArmyAction::Scout => sector_center(sector, input.own_hq_tile),
                         ArmyAction::Attack => {
                             if units.len() >= 3 {
-                                (63 - input.own_hq_tile.0, 63 - input.own_hq_tile.1)
+                                let max_tile = MAP_SIZE as u8 - 1;
+                                (
+                                    max_tile - input.own_hq_tile.0,
+                                    max_tile - input.own_hq_tile.1,
+                                )
                             } else {
                                 input.own_hq_tile
                             }
@@ -240,7 +268,7 @@ pub fn decide(
     let tech_base = sector_base + SECTOR_OUT;
     let mut best_tech: Option<(f32, TechId)> = None;
     for i in 0..TECH_OUT {
-        let tech = TECH_TYPES[i];
+        let tech = LEARNED_TECH_TYPES[i];
         if tech_allowed(game, player, tech) {
             let s = out[tech_base + i];
             if s > THRESHOLD && best_tech.is_none_or(|(bs, _)| s > bs) {
@@ -325,25 +353,31 @@ fn snipe_target(
 }
 
 fn sector_center(sector: usize, own_hq: (u8, u8)) -> (u8, u8) {
-    let mut sx = sector % 8;
-    let mut sy = sector / 8;
-    if own_hq.0 >= 32 {
-        sx = 7 - sx;
+    const SECTORS_PER_AXIS: usize = 8;
+    let sector_size = MAP_SIZE / SECTORS_PER_AXIS;
+    let mut sx = sector % SECTORS_PER_AXIS;
+    let mut sy = sector / SECTORS_PER_AXIS;
+    let map_mid = (MAP_SIZE / 2) as u8;
+    if own_hq.0 >= map_mid {
+        sx = SECTORS_PER_AXIS - 1 - sx;
     }
-    if own_hq.1 >= 32 {
-        sy = 7 - sy;
+    if own_hq.1 >= map_mid {
+        sy = SECTORS_PER_AXIS - 1 - sy;
     }
-    ((sx * 8 + 4) as u8, (sy * 8 + 4) as u8)
+    (
+        (sx * sector_size + sector_size / 2) as u8,
+        (sy * sector_size + sector_size / 2) as u8,
+    )
 }
 
 // --- Legality masks ---------------------------------------------------------
 
 fn build_allowed(game: &Game, p: Player, bt: BuildingType) -> bool {
-    if bt != BuildingType::Refinery
+    if !bt.is_refinery()
         && !game
             .buildings
             .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::Refinery)
+            .any(|b| b.owner == p && b.btype.is_refinery() && b.is_operational())
     {
         return false;
     }
@@ -351,21 +385,21 @@ fn build_allowed(game: &Game, p: Player, bt: BuildingType) -> bool {
         && !game
             .buildings
             .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::Factory)
+            .any(|b| b.owner == p && b.btype == BuildingType::Factory && b.is_operational())
     {
         return false;
     }
     // Second-tier structures need the TechLab itself.
-    if (bt == BuildingType::Radar || bt == BuildingType::TeslaCoil)
+    if (bt == BuildingType::Radar || bt == BuildingType::TeslaCoil || bt == BuildingType::AATurret)
         && !game
             .buildings
             .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::TechLab)
+            .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
     {
         return false;
     }
-    let cost = crucible_sim::building_stats(bt).cost;
-    if game.ore[p.index()] < cost {
+    let cost = crucible_sim::building_stats(bt).resource_cost;
+    if !game.can_afford(p, cost) {
         return false;
     }
     build_preferred(game, p, bt)
@@ -373,18 +407,30 @@ fn build_allowed(game: &Game, p: Player, bt: BuildingType) -> bool {
 }
 
 fn base_offset(hq: (u8, u8), dx: i32, dy: i32) -> (u8, u8) {
-    let sx = if hq.0 < 32 { dx } else { -dx };
-    let sy = if hq.1 < 32 { dy } else { -dy };
+    let sx = if hq.0 < (MAP_SIZE / 2) as u8 { dx } else { -dx };
+    let sy = if hq.1 < (MAP_SIZE / 2) as u8 { dy } else { -dy };
     (
-        (hq.0 as i32 + sx).clamp(0, 63) as u8,
-        (hq.1 as i32 + sy).clamp(0, 63) as u8,
+        (hq.0 as i32 + sx).clamp(0, MAP_SIZE as i32 - 1) as u8,
+        (hq.1 as i32 + sy).clamp(0, MAP_SIZE as i32 - 1) as u8,
     )
 }
 
 fn build_preferred(game: &Game, p: Player, bt: BuildingType) -> Option<(u8, u8)> {
     let hq = game.hq(p)?;
     let hq_tile = hq.tile;
-    Some(match bt {
+    // Terrain-aware bias: defensive structures (Turret, TeslaCoil, AATurret)
+    // prefer Hills for the +30% defense bonus. Economy structures prefer
+    // Plains to keep buildable ground open. The ring search in
+    // find_build_tile still validates the final tile.
+    let terrain_bonus = |tile: (u8, u8)| -> i32 {
+        match game.map.terrain_at(tile.0, tile.1) {
+            crucible_sim::map::Terrain::Hills => 30,
+            crucible_sim::map::Terrain::Forest => 15,
+            crucible_sim::map::Terrain::Plains => 10,
+            _ => 0,
+        }
+    };
+    let base = match bt {
         BuildingType::PowerPlant => base_offset(hq_tile, 0, -2),
         BuildingType::Refinery => base_offset(hq_tile, 2, 0),
         BuildingType::Factory => base_offset(hq_tile, 0, 2),
@@ -394,12 +440,40 @@ fn build_preferred(game: &Game, p: Player, bt: BuildingType) -> Option<(u8, u8)>
         BuildingType::Radar => base_offset(hq_tile, -4, 2),
         BuildingType::TeslaCoil => base_offset(hq_tile, 2, -2),
         BuildingType::Turret => base_offset(hq_tile, -2, 0),
-        // Refineries ignore the preferred tile (they must touch their field),
-        // but the anchor biases the search toward the base pockets.
         BuildingType::CrystalRefinery => base_offset(hq_tile, 3, 0),
         BuildingType::AATurret => base_offset(hq_tile, -3, 0),
         BuildingType::Hq => hq_tile,
-    })
+    };
+    // For defensive structures, if the preferred tile isn't on good
+    // terrain, search the ring for a better one. This is terrain-aware
+    // placement without a full search: just pick the best of a few
+    // candidates around the base.
+    if matches!(
+        bt,
+        BuildingType::Turret | BuildingType::TeslaCoil | BuildingType::AATurret
+    ) {
+        let mut best_tile = base;
+        let mut best_score = terrain_bonus(base);
+        for r in 1..=3i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let x = (base.0 as i32 + dx).clamp(0, MAP_SIZE as i32 - 1) as u8;
+                    let y = (base.1 as i32 + dy).clamp(0, MAP_SIZE as i32 - 1) as u8;
+                    let score = terrain_bonus((x, y));
+                    if score > best_score {
+                        best_score = score;
+                        best_tile = (x, y);
+                    }
+                }
+            }
+        }
+        Some(best_tile)
+    } else {
+        Some(base)
+    }
 }
 
 fn train_allowed(game: &Game, p: Player, ut: UnitType) -> bool {
@@ -408,7 +482,7 @@ fn train_allowed(game: &Game, p: Player, ut: UnitType) -> bool {
         && !game
             .buildings
             .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::TechLab)
+            .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
     {
         return false;
     }
@@ -418,13 +492,16 @@ fn train_allowed(game: &Game, p: Player, ut: UnitType) -> bool {
             return false;
         }
     }
-    if game.ore[p.index()] < unit_stats(ut).cost {
+    if !game.can_afford(p, unit_stats(ut).resource_cost) {
         return false;
     }
     let producer = producer_for(ut);
-    game.buildings
-        .iter()
-        .any(|b| b.owner == p && b.btype == producer && b.queue.len() < game.config.max_queue)
+    game.buildings.iter().any(|b| {
+        b.owner == p
+            && b.btype == producer
+            && b.is_operational()
+            && b.queue.len() < game.config.max_queue
+    })
 }
 
 fn producer_for(ut: UnitType) -> BuildingType {
@@ -440,11 +517,11 @@ fn producer_for(ut: UnitType) -> BuildingType {
 fn tech_allowed(game: &Game, p: Player, tech: TechId) -> bool {
     game.buildings
         .iter()
-        .any(|b| b.owner == p && b.btype == BuildingType::TechLab)
+        .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
         && !game.research[p.index()].has(tech)
         && game.research[p.index()].researching.is_none()
         && prereqs_met(tech, &game.research[p.index()].researched)
-        && tech_info(tech).crystal_cost <= game.crystal[p.index()]
+        && tech_info(tech).crystal_cost <= game.resources(p).crystal
 }
 
 #[cfg(test)]
@@ -464,39 +541,50 @@ mod tests {
             hp: stats.hp,
             max_hp: stats.hp,
             mp: stats.mp,
+            move_target: None,
             moved: false,
             acted: false,
         });
         id
     }
 
-    /// A free, passable, ore-free tile adjacent to an ore tile and within the
-    /// base clump radius of `hq` — the Refinery rule (must touch ore) made
-    /// fixed offsets near the HQ invalid on generated maps.
+    /// Find the nearest live deposit tile that can host the generic refinery.
+    /// The structure occupies the resource tile itself; `reserved` only keeps
+    /// this test fixture's later placements from colliding with it.
     fn refinery_tile(g: &Game, hq: (u8, u8), reserved: &[(u8, u8)]) -> (u8, u8) {
         use crucible_sim::map::{tile_coords, MAP_TILES};
-        use crucible_sim::orders::NEIGHBOR_OFFSETS;
-        let ore_tile = (0..MAP_TILES)
+        let mut fields: Vec<(i32, usize, (u8, u8))> = (0..MAP_TILES)
             .map(tile_coords)
-            .filter(|&t| g.map.ore_at(t.0, t.1) > 0)
-            .min_by_key(|&t| chebyshev(hq.0, hq.1, t.0, t.1))
-            .expect("map has ore");
-        for (dx, dy) in NEIGHBOR_OFFSETS {
-            let (x, y) = (ore_tile.0 as i32 + dx, ore_tile.1 as i32 + dy);
-            if x < 0 || y < 0 || x >= MAP_TILES as i32 / 64 || y >= MAP_TILES as i32 / 64 {
-                continue;
-            }
-            let t = (x as u8, y as u8);
-            if g.map.is_passable(t.0, t.1)
-                && g.map.ore_at(t.0, t.1) == 0
-                && g.building_at(t).is_none()
-                && !reserved.contains(&t)
-                && chebyshev(hq.0, hq.1, t.0, t.1) <= 5
-            {
-                return t;
-            }
+            .filter(|&t| g.map.resource_amount_at(t.0, t.1) > 0)
+            .map(|t| {
+                (
+                    chebyshev(hq.0, hq.1, t.0, t.1),
+                    crucible_sim::map::tile_index(t.0, t.1),
+                    t,
+                )
+            })
+            .collect();
+        fields.sort_by_key(|&(distance, index, _)| (distance, index));
+        fields
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .find(|&t| {
+                !reserved.contains(&t)
+                    && g.validate_command(&Command::PlaceBuilding {
+                        player: Player::P0,
+                        btype: BuildingType::Refinery,
+                        tile: t,
+                    })
+                    .is_ok()
+            })
+            .expect("map has a legal resource tile")
+    }
+
+    fn mature_buildings(g: &mut Game, own_turns: usize) {
+        for _ in 0..own_turns {
+            g.end_turn();
+            g.end_turn();
         }
-        panic!("no refinery placement tile");
     }
 
     #[test]
@@ -607,6 +695,8 @@ mod tests {
         // must never permanently hide them from the network.
         let mut g = Game::new(Map::generate(5), GameConfig::default());
         g.ore[0] = 10_000;
+        g.steel[0] = 10_000;
+        g.coal[0] = 10_000;
         let hq = g.hq(Player::P0).unwrap().tile;
 
         // Refinery (must touch ore under the new rule) + Factory (the Factory
@@ -624,6 +714,7 @@ mod tests {
             assert!(g.validate_command(&cmd).is_ok(), "{cmd:?} must be legal");
             g.apply_commands(Player::P0, &[cmd]);
         }
+        mature_buildings(&mut g, 2);
         assert!(build_allowed(&g, Player::P0, BuildingType::Airfield));
 
         // Place the Airfield and verify both aircraft trains are unmasked.
@@ -634,6 +725,7 @@ mod tests {
         };
         assert!(g.validate_command(&cmd).is_ok(), "{cmd:?} must be legal");
         g.apply_commands(Player::P0, &[cmd]);
+        mature_buildings(&mut g, 2);
         assert!(train_allowed(&g, Player::P0, UnitType::Gunship));
         assert!(train_allowed(&g, Player::P0, UnitType::Interceptor));
 
@@ -650,6 +742,8 @@ mod tests {
         // whole tree.
         let mut g = Game::new(Map::generate(5), GameConfig::default());
         g.ore[0] = 100_000;
+        g.steel[0] = 100_000;
+        g.coal[0] = 100_000;
         let hq = g.hq(Player::P0).unwrap().tile;
 
         // Locked before the TechLab exists.
@@ -672,6 +766,7 @@ mod tests {
             assert!(g.validate_command(&cmd).is_ok(), "{cmd:?} must be legal");
             g.apply_commands(Player::P0, &[cmd]);
         }
+        mature_buildings(&mut g, 2);
         let cmd = Command::PlaceBuilding {
             player: Player::P0,
             btype: BuildingType::TechLab,
@@ -679,6 +774,7 @@ mod tests {
         };
         assert!(g.validate_command(&cmd).is_ok(), "{cmd:?} must be legal");
         g.apply_commands(Player::P0, &[cmd]);
+        mature_buildings(&mut g, 3);
 
         // Everything on the second tier is now unmasked.
         assert!(build_allowed(&g, Player::P0, BuildingType::Radar));

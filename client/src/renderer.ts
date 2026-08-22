@@ -5,22 +5,25 @@
 import { fx } from "./fx";
 import {
   drawBuildingSprite,
-  drawCrystalDeposit,
+  drawDesertTile,
   drawForestTile,
   drawHealthBar,
   drawHillsTile,
   drawImpassableTile,
-  drawOreDeposit,
+  drawMountainTile,
+  drawResourceDeposit,
   drawPassableTile,
+  drawRiverTile,
   drawSelectionReticle,
+  drawSwampTile,
   drawUnitSprite,
   drawWaterTile,
 } from "./sprites";
-import { BUILDING_KINDS, BUILD_COSTS } from "./types";
+import { BUILDING_KINDS, BUILD_COSTS, MAP_SIZE, resourceBundleAffordable } from "./types";
 import type { Entity } from "./world";
 import { World } from "./world";
 
-export const MAP = 64;
+export const MAP = MAP_SIZE;
 export const ZOOM_MIN = 4;
 export const ZOOM_MAX = 96;
 
@@ -155,9 +158,14 @@ const COLORS = {
 
 export interface RenderOptions {
   waypoints?: Map<number, [number, number]>;
+  /** Tile currently selected for the contextual inspector. */
+  selectedTile?: [number, number] | null;
   placementMode?: string | null;
   placementCursor?: [number, number] | null;
   drawMinimap?: boolean;
+  /** Tile under the mouse; when set and a single friendly unit is selected,
+   *  a movement-cost path preview is drawn (U4). */
+  hoverTile?: [number, number] | null;
 }
 
 /** Cosmetic animation clock (~20 Hz), independent of game turns. */
@@ -172,6 +180,11 @@ function defaultHeading(owner: number): number {
 
 export class Renderer {
   camera = new Camera();
+
+  /** Frame time at which each tile became visible (fog reveal fade, U5). */
+  private revealStart = new Map<number, number>();
+  /** Visible set from the previous frame, used to detect reveals. */
+  private prevVisible = new Set<number>();
 
   draw(
     ctx: CanvasRenderingContext2D,
@@ -210,55 +223,83 @@ export class Renderer {
         const terrain = world.terrain.length > 0 ? world.terrain[idx] : undefined;
         const isPassable = world.passable[idx] ?? true;
 
-        // Typed terrain (Plains/Forest/Hills/Water/Mountain): passability and
+        // U5: newly visible tiles fade in over ~300 ms instead of popping,
+        // so the fog of war reads as a smooth reveal rather than a blink.
+        let revealAlpha = 1;
+        if (isVis && !this.prevVisible.has(idx)) {
+          this.revealStart.set(idx, performance.now());
+        }
+        if (isVis) {
+          const t0 = this.revealStart.get(idx);
+          if (t0 !== undefined) {
+            revealAlpha = Math.min(1, (performance.now() - t0) / 300);
+          }
+        }
+
+        // Typed terrain (biomes, rivers, lakes, mountains): passability and
         // the tile's look both come from the sim's terrain field, so what the
         // player sees is what the engine moves and defends on.
-        if (!isVis) {
+        if (revealAlpha < 1) {
+          // Fading reveal: everything (base tile + topology) drawn under one
+          // global alpha so the fog transition is a smooth fade, not a pop.
+          ctx.save();
+          ctx.globalAlpha = revealAlpha;
+          this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, false);
+          drawTerrainTopology(ctx, world, tx, ty, px, py, size, terrain ?? (isPassable ? "Plains" : "Mountain"));
+          ctx.restore();
+        } else if (!isVis) {
           // Explored-but-not-visible: dark silhouette of the real terrain.
-          if (terrain === "Forest") drawForestTile(ctx, tx, ty, px, py, size, true);
-          else if (terrain === "Hills") drawHillsTile(ctx, tx, ty, px, py, size, true);
-          else if (terrain === "Water") drawWaterTile(ctx, tx, ty, px, py, size, true);
-          else if (isPassable) drawPassableTile(ctx, tx, ty, px, py, size, true);
-          else drawImpassableTile(ctx, tx, ty, px, py, size, true);
-        } else if (terrain === "Forest") {
-          drawForestTile(ctx, tx, ty, px, py, size, false);
-        } else if (terrain === "Hills") {
-          drawHillsTile(ctx, tx, ty, px, py, size, false);
-        } else if (terrain === "Water") {
-          drawWaterTile(ctx, tx, ty, px, py, size, false);
-        } else if (isPassable) {
-          drawPassableTile(ctx, tx, ty, px, py, size, false);
+          this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, true);
         } else {
-          drawImpassableTile(ctx, tx, ty, px, py, size, false);
+          this.drawTerrainTile(ctx, terrain, isPassable, tx, ty, px, py, size, false);
+          drawTerrainTopology(ctx, world, tx, ty, px, py, size, terrain ?? (isPassable ? "Plains" : "Mountain"));
         }
       }
     }
+    this.prevVisible = new Set(world.visible);
 
-    // 3. Ore Fields + Crystal Fields
-    for (const t of world.oreTiles.values()) {
+    // 3. Selected tile frame. The border remains visible for unexplored tiles
+    // without revealing any hidden terrain or resource details.
+    if (opts.selectedTile) {
+      const [tx, ty] = opts.selectedTile;
+      if (tx >= 0 && tx < MAP && ty >= 0 && ty < MAP) {
+        const px = cam.screenX(tx);
+        const py = cam.screenY(ty);
+        ctx.save();
+        ctx.fillStyle = "rgba(255, 226, 122, 0.08)";
+        ctx.fillRect(px, py, cam.zoom, cam.zoom);
+        ctx.strokeStyle = "rgba(255, 226, 122, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(Math.floor(px) + 1, Math.floor(py) + 1, Math.floor(cam.zoom) - 2, Math.floor(cam.zoom) - 2);
+        ctx.restore();
+      }
+    }
+
+    // 4. Infinite deposits: the generic stream is always authoritative.
+    for (const t of world.resourceTiles.values()) {
       const px = cam.screenX(t.x);
       const py = cam.screenY(t.y);
       const size = cam.zoom;
       if (px > w || py > h || px + size < 0 || py + size < 0) continue;
-      drawOreDeposit(ctx, px, py, size, t.amount, animClock());
-    }
-    for (const t of world.crystalTiles.values()) {
-      const px = cam.screenX(t.x);
-      const py = cam.screenY(t.y);
-      const size = cam.zoom;
-      if (px > w || py > h || px + size < 0 || py + size < 0) continue;
-      drawCrystalDeposit(ctx, px, py, size, t.amount, animClock());
+      if (t.infinite !== true && t.amount <= 0) continue;
+      drawResourceDeposit(ctx, t.resource, px, py, size, t.amount, animClock(), t.richness);
     }
 
-    // 4. Ground Layer FX: Scorch craters, tracks, wreckage
+    // 5. Ground Layer FX: Scorch craters, tracks, wreckage
     fx.drawGroundLayer(ctx, cam, w, h);
 
-    // 5. Waypoint destination lines (units only — rally points are gone)
+    // 6. Waypoint destination lines (units only — rally points are gone)
     if (opts.waypoints && selection.size > 0) {
       this.drawUnitWaypoints(ctx, world, selection, opts.waypoints);
     }
 
-    // 6. Entities: Buildings first, then units
+    // 7b. Movement path preview (U4): show the A* route a selected unit
+    // would take to the hovered tile, with a cost readout.
+    if (opts.hoverTile && selection.size === 1) {
+      this.drawPathPreview(ctx, world, selection, opts.hoverTile);
+    }
+
+    // 7. Entities: Buildings first, then units
     const drawList = [...world.entities.values()].sort((a, b) => {
       const aUnit = isUnit(a);
       const bUnit = isUnit(b);
@@ -270,17 +311,87 @@ export class Renderer {
       this.drawEntity(ctx, world, e, selection, w, h);
     }
 
-    // 7. Air Layer FX: Projectiles, lasers, explosions, particles
+    // 7c. Stacking badges (U12): when several units share a tile, the top
+    // entity gets a small ×N counter so the player knows the tile holds more
+    // than one unit.
+    this.drawStackingBadges(ctx, drawList, w, h);
+
+    // 8. Air Layer FX: Projectiles, lasers, explosions, particles
     fx.drawAirLayer(ctx, cam, w, h);
 
-    // 8. Building placement ghost
+    // 9. Building placement ghost
     if (opts.placementMode && opts.placementCursor) {
       this.drawPlacementGhost(ctx, opts.placementMode, opts.placementCursor, world);
     }
 
-    // 9. Optional on-canvas Minimap
+    // 10. Optional on-canvas Minimap
     if (opts.drawMinimap) {
       this.drawMinimap(ctx, world, selection, w, h);
+    }
+  }
+
+  /** Draw one terrain tile at `px,py` (shared by the fog-reveal path). */
+  private drawTerrainTile(
+    ctx: CanvasRenderingContext2D,
+    terrain: string | undefined,
+    isPassable: boolean,
+    tx: number,
+    ty: number,
+    px: number,
+    py: number,
+    size: number,
+    silhouette: boolean,
+  ): void {
+    if (terrain === "Forest") drawForestTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (terrain === "Hills") drawHillsTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (terrain === "Desert") drawDesertTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (terrain === "Swamp") drawSwampTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (terrain === "Water") drawWaterTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (terrain === "River") drawRiverTile(ctx, tx, ty, px, py, size, silhouette, animClock());
+    else if (terrain === "Mountain") drawMountainTile(ctx, tx, ty, px, py, size, silhouette);
+    else if (isPassable) drawPassableTile(ctx, tx, ty, px, py, size, silhouette);
+    else drawImpassableTile(ctx, tx, ty, px, py, size, silhouette);
+  }
+
+  /** Draw ×N counters on tiles that hold more than one unit (U12). */
+  private drawStackingBadges(
+    ctx: CanvasRenderingContext2D,
+    drawList: Entity[],
+    w: number,
+    h: number,
+  ): void {
+    const cam = this.camera;
+    const perTile = new Map<number, Entity[]>();
+    for (const e of drawList) {
+      if (!isUnit(e)) continue;
+      const key = Math.floor(e.x) * MAP + Math.floor(e.y);
+      const list = perTile.get(key);
+      if (list) list.push(e);
+      else perTile.set(key, [e]);
+    }
+    const z = cam.zoom;
+    for (const [key, list] of perTile) {
+      if (list.length < 2) continue;
+      // Topmost = last drawn = the one with the highest id.
+      const top = list[list.length - 1];
+      const px = cam.screenX(top.x);
+      const py = cam.screenY(top.y);
+      if (px < -z * 2 || py < -z * 2 || px > w + z * 2 || py > h + z * 2) continue;
+      const label = `×${list.length}`;
+      ctx.save();
+      ctx.font = `bold ${Math.max(8, Math.floor(z * 0.32))}px monospace`;
+      const tw = ctx.measureText(label).width;
+      const bx = px + z / 2 + 2;
+      const by = py - 2;
+      ctx.fillStyle = "rgba(8, 10, 12, 0.85)";
+      ctx.fillRect(bx, by - 10, tw + 6, 13);
+      ctx.strokeStyle = "rgba(255, 226, 122, 0.8)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by - 10, tw + 6, 13);
+      ctx.fillStyle = "#ffe27a";
+      ctx.fillText(label, bx + 3, by);
+      ctx.restore();
+      void key;
     }
   }
 
@@ -331,7 +442,19 @@ export class Renderer {
 
     if (isUnit(e)) {
       fx.recordVehicleMovement(e.id, e.kind, e.x, e.y, heading);
-      drawUnitSprite(ctx, e.kind, px, py, z, e.owner, heading, animClock(), isStale, firingAge, false);
+      drawUnitSprite(
+        ctx,
+        e.kind,
+        px,
+        py,
+        z,
+        e.owner,
+        heading,
+        animClock(),
+        isStale,
+        firingAge,
+        e.moved === true,
+      );
     } else {
       drawBuildingSprite(
         ctx,
@@ -343,8 +466,8 @@ export class Renderer {
         heading,
         animClock(),
         isStale,
-        e.progress ?? 0,
-        e.buildTime ?? 0,
+        e.constructionProgress ?? 0,
+        e.constructionTime ?? 0,
         firingAge,
       );
     }
@@ -420,6 +543,150 @@ export class Renderer {
     }
   }
 
+  /** A* over world tiles: cheapest path from `from` to `to` honoring
+   *  passability, terrain move multipliers, and enemy occupancy. Returns
+   *  the tile list (excluding the start) or null when unreachable. */
+  static pathfind(
+    world: World,
+    from: [number, number],
+    to: [number, number],
+  ): [number, number][] | null {
+    if (from[0] === to[0] && from[1] === to[1]) return [];
+    const w = MAP;
+    const h = MAP;
+    const idx = (x: number, y: number) => y * w + x;
+    const blocked = (x: number, y: number): boolean => {
+      if (x < 0 || y < 0 || x >= w || y >= h) return true;
+      const i = idx(x, y);
+      const rule = world.terrainRules.get(world.terrain[i]);
+      if (!rule || !rule.passable) return true;
+      // Enemy-held tiles are not routable through.
+      for (const e of world.entities.values()) {
+        if (e.owner === 0) continue;
+        if (Math.floor(e.x) === x && Math.floor(e.y) === y) return true;
+      }
+      return false;
+    };
+    const cost = (x: number, y: number): number => {
+      const rule = world.terrainRules.get(world.terrain[idx(x, y)]);
+      return rule ? Math.max(1, rule.moveMultiplier) : 1;
+    };
+    const g = new Map<number, number>();
+    const came = new Map<number, number>();
+    const open = new Map<number, number>(); // idx -> f
+    const startIdx = idx(from[0], from[1]);
+    const goalIdx = idx(to[0], to[1]);
+    const heuristic = (i: number): number => {
+      const x = i % w;
+      const y = Math.floor(i / w);
+      return Math.max(Math.abs(x - to[0]), Math.abs(y - to[1]));
+    };
+    g.set(startIdx, 0);
+    open.set(startIdx, heuristic(startIdx));
+    let guard = 0;
+    while (open.size > 0 && guard < 40_000) {
+      guard += 1;
+      let bestIdx = -1;
+      let bestF = Infinity;
+      for (const [i, f] of open) {
+        if (f < bestF) {
+          bestF = f;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === goalIdx) break;
+      open.delete(bestIdx);
+      const bx = bestIdx % w;
+      const by = Math.floor(bestIdx / w);
+      const gBest = g.get(bestIdx)!;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
+        const nx = bx + dx;
+        const ny = by + dy;
+        if (blocked(nx, ny)) continue;
+        const ni = idx(nx, ny);
+        const step = cost(nx, ny) * (dx !== 0 && dy !== 0 ? 1.4 : 1);
+        const ng = gBest + step;
+        const known = g.get(ni);
+        if (known !== undefined && known <= ng) continue;
+        g.set(ni, ng);
+        came.set(ni, bestIdx);
+        open.set(ni, ng + heuristic(ni));
+      }
+    }
+    if (!came.has(goalIdx)) return null;
+    const path: [number, number][] = [];
+    let cur = goalIdx;
+    while (cur !== startIdx) {
+      const prev = came.get(cur);
+      if (prev === undefined) break;
+      path.push([cur % w, Math.floor(cur / w)]);
+      cur = prev;
+    }
+    path.reverse();
+    return path;
+  }
+
+  /** Draw the movement path preview for a single selected unit (U4). */
+  private drawPathPreview(
+    ctx: CanvasRenderingContext2D,
+    world: World,
+    selection: Set<number>,
+    target: [number, number],
+  ): void {
+    const unit = [...selection]
+      .map((id) => world.entities.get(id))
+      .find((e) => e && e.owner === 0 && isUnit(e));
+    if (!unit) return;
+    const from: [number, number] = [Math.floor(unit.x), Math.floor(unit.y)];
+    const path = Renderer.pathfind(world, from, target);
+    if (!path) return;
+    const cam = this.camera;
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 226, 122, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 5]);
+    ctx.lineDashOffset = -(animClock() * 0.6) % 11;
+    ctx.beginPath();
+    let started = false;
+    for (const [px, py] of [from, ...path]) {
+      const sx = cam.screenX(px + 0.5);
+      const sy = cam.screenY(py + 0.5);
+      if (!started) {
+        ctx.moveTo(sx, sy);
+        started = true;
+      } else {
+        ctx.lineTo(sx, sy);
+      }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Cost readout at the end of the route.
+    const total = Renderer.pathCost(world, path);
+    const end = path[path.length - 1] ?? from;
+    const ex = cam.screenX(end[0] + 0.5);
+    const ey = cam.screenY(end[1] + 0.5);
+    const label = `${total} MP`;
+    ctx.font = "bold 11px monospace";
+    const tw = ctx.measureText(label).width;
+    const bx = Math.min(cam.viewportW - tw - 6, Math.max(2, ex - tw / 2));
+    const by = Math.max(12, ey - 10);
+    ctx.fillStyle = "rgba(8, 10, 12, 0.82)";
+    ctx.fillRect(bx - 3, by - 11, tw + 6, 14);
+    ctx.fillStyle = "#ffe27a";
+    ctx.fillText(label, bx, by);
+    ctx.restore();
+  }
+
+  /** Movement-point cost of a path from `from` (used by the preview). */
+  static pathCost(world: World, path: [number, number][]): number {
+    let total = 0;
+    for (const tile of path) {
+      const rule = world.terrainRules.get(world.terrain[tile[1] * MAP + tile[0]]);
+      total += rule ? Math.max(1, rule.moveMultiplier) : 1;
+    }
+    return Math.round(total * 10) / 10;
+  }
+
   private drawPlacementGhost(
     ctx: CanvasRenderingContext2D,
     btype: string,
@@ -438,27 +705,27 @@ export class Renderer {
     const rx = cam.screenX(cursor[0]);
     const ry = cam.screenY(cursor[1]);
 
-    if (placable) {
-      ctx.fillStyle = "rgba(34, 197, 94, 0.18)";
-      ctx.fillRect(rx, ry, cam.zoom, cam.zoom);
-      ctx.strokeStyle = "#22c55e";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(rx, ry, cam.zoom, cam.zoom);
-    } else {
-      ctx.fillStyle = "rgba(239, 68, 68, 0.25)";
-      ctx.fillRect(rx, ry, cam.zoom, cam.zoom);
-      ctx.strokeStyle = "#ef4444";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(rx, ry, cam.zoom, cam.zoom);
-
-      // Red X across unplacable tile
+    // Placement feedback is a single-tile footprint. A warm neutral outline
+    // marks a legal site; an amber-red outline and X mark a rejected site.
+    const z = cam.zoom;
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = placable ? "rgba(231, 202, 138, 0.95)" : "rgba(208, 120, 104, 0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(
+      Math.floor(rx) + 1,
+      Math.floor(ry) + 1,
+      Math.max(1, Math.floor(z) - 2),
+      Math.max(1, Math.floor(z) - 2),
+    );
+    if (!placable) {
       ctx.beginPath();
-      ctx.moveTo(rx + 2, ry + 2);
-      ctx.lineTo(rx + cam.zoom - 2, ry + cam.zoom - 2);
-      ctx.moveTo(rx + cam.zoom - 2, ry + 2);
-      ctx.lineTo(rx + 2, ry + cam.zoom - 2);
+      ctx.moveTo(rx + 3, ry + 3);
+      ctx.lineTo(rx + z - 3, ry + z - 3);
+      ctx.moveTo(rx + z - 3, ry + 3);
+      ctx.lineTo(rx + 3, ry + z - 3);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -482,8 +749,9 @@ export class Renderer {
     for (let ty = 0; ty < MAP; ty++) {
       for (let tx = 0; tx < MAP; tx++) {
         const idx = ty * MAP + tx;
+        const terrain = world.terrain[idx] ?? (world.passable[idx] ? "Plains" : "Mountain");
         if (world.visible.has(idx)) {
-          ctx.fillStyle = world.passable[idx] ? COLORS.passable : COLORS.impassable;
+          ctx.fillStyle = terrainRadarColor(terrain);
         } else if (world.explored.has(idx)) {
           ctx.fillStyle = world.passable[idx] ? "#172119" : "#1b2022";
         } else {
@@ -493,17 +761,10 @@ export class Renderer {
       }
     }
 
-    ctx.fillStyle = COLORS.ore;
-    for (const t of world.oreTiles.values()) {
-      if (t.amount > 0) {
-        ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
-      }
-    }
-    ctx.fillStyle = "#22d3ee";
-    for (const t of world.crystalTiles.values()) {
-      if (t.amount > 0) {
-        ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
-      }
+    for (const t of world.resourceTiles.values()) {
+      if (t.infinite !== true && t.amount <= 0) continue;
+      ctx.fillStyle = resourceColor(t.resource);
+      ctx.fillRect(ox + t.x * s, oy + t.y * s, s, s);
     }
 
     for (const e of world.entities.values()) {
@@ -556,8 +817,9 @@ export function drawRadar(
   for (let ty = 0; ty < MAP; ty++) {
     for (let tx = 0; tx < MAP; tx++) {
       const idx = ty * MAP + tx;
+      const terrain = world.terrain[idx] ?? (world.passable[idx] ? "Plains" : "Mountain");
       if (world.visible.has(idx)) {
-        ctx.fillStyle = world.passable[idx] ? COLORS.passable : COLORS.impassable;
+        ctx.fillStyle = terrainRadarColor(terrain);
       } else if (world.explored.has(idx)) {
         ctx.fillStyle = world.passable[idx] ? "#172119" : "#1b2022";
       } else {
@@ -567,18 +829,11 @@ export function drawRadar(
     }
   }
 
-  // 2. Ore fields + crystal fields
-  ctx.fillStyle = COLORS.ore;
-  for (const t of world.oreTiles.values()) {
-    if (t.amount > 0) {
-      ctx.fillRect(ox + t.x * s, oy + t.y * s, Math.max(2, s), Math.max(2, s));
-    }
-  }
-  ctx.fillStyle = "#22d3ee";
-  for (const t of world.crystalTiles.values()) {
-    if (t.amount > 0) {
-      ctx.fillRect(ox + t.x * s, oy + t.y * s, Math.max(2, s), Math.max(2, s));
-    }
+  // 2. Generic infinite deposits
+  for (const t of world.resourceTiles.values()) {
+    if (t.infinite !== true && t.amount <= 0) continue;
+    ctx.fillStyle = resourceColor(t.resource);
+    ctx.fillRect(ox + t.x * s, oy + t.y * s, Math.max(2, s), Math.max(2, s));
   }
 
   // 3. Entities
@@ -639,6 +894,135 @@ export function drawRadar(
   ctx.stroke();
 }
 
+/** Add small topology cues after the base tile is painted. These edges are
+ * intentionally softer than a full grid: shores, ridge faces, and river
+ * banks communicate connected landforms without turning the map into graph
+ * paper. */
+function drawTerrainTopology(
+  ctx: CanvasRenderingContext2D,
+  world: World,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  terrain: string,
+): void {
+  const neighbors = [
+    { x: tx, y: ty - 1, edge: "north" },
+    { x: tx + 1, y: ty, edge: "east" },
+    { x: tx, y: ty + 1, edge: "south" },
+    { x: tx - 1, y: ty, edge: "west" },
+  ];
+  const neighbor = (x: number, y: number): string | null => {
+    if (x < 0 || y < 0 || x >= MAP || y >= MAP) return null;
+    const index = y * MAP + x;
+    if (!world.visible.has(index)) return null;
+    return world.terrain[index] ?? (world.passable[index] ? "Plains" : "Mountain");
+  };
+
+  // Edge styles per terrain pair: organic sandy beaches & surf where water meets land,
+  // seamless water/river junctions, rugged mountain crag outlines, and soft forest fringes.
+  const w = Math.max(1, Math.min(3, size * 0.08));
+  const isWaterBody = (k: string) => k === "Water" || k === "River";
+
+  const edgeStyle = (a: string, b: string): { stroke: string; foam?: string } | null => {
+    // Water meeting water: seamless flow, no dividing boundary
+    if (isWaterBody(a) && isWaterBody(b)) return null;
+
+    // Water/River meeting land: golden beach and white surf
+    if (isWaterBody(a)) {
+      return {
+        stroke: "rgba(218, 185, 110, 0.88)", // golden beach shoreline
+        foam: "rgba(220, 245, 255, 0.75)",   // foaming surf crest
+      };
+    }
+    if (isWaterBody(b)) {
+      return {
+        stroke: "rgba(180, 150, 90, 0.50)", // wet coastal soil
+      };
+    }
+
+    if (a === "Mountain") return { stroke: "rgba(42, 50, 60, 0.88)" }; // alpine rock precipice
+    if (b === "Mountain") return { stroke: "rgba(120, 136, 152, 0.40)" }; // talus scree base
+    if (a === "Forest") return { stroke: "rgba(78, 160, 86, 0.60)" };  // leafy canopy fringe
+    if (a === "Swamp") return { stroke: "rgba(34, 52, 24, 0.65)" };   // dark peat wetland boundary
+    if (a === "Hills" && b !== "Hills") return { stroke: "rgba(122, 105, 68, 0.55)" }; // terrace contour step
+    return null;
+  };
+
+  ctx.save();
+  for (const n of neighbors) {
+    const other = neighbor(n.x, n.y);
+    if (other == null || other === terrain) continue;
+    const style = edgeStyle(terrain, other);
+    if (!style) continue;
+
+    ctx.lineWidth = w;
+    ctx.strokeStyle = style.stroke;
+    ctx.beginPath();
+    if (n.edge === "north") {
+      ctx.moveTo(px, py + w / 2);
+      ctx.lineTo(px + size, py + w / 2);
+    } else if (n.edge === "east") {
+      ctx.moveTo(px + size - w / 2, py);
+      ctx.lineTo(px + size - w / 2, py + size);
+    } else if (n.edge === "south") {
+      ctx.moveTo(px, py + size - w / 2);
+      ctx.lineTo(px + size, py + size - w / 2);
+    } else {
+      ctx.moveTo(px + w / 2, py);
+      ctx.lineTo(px + w / 2, py + size);
+    }
+    ctx.stroke();
+
+    // Foaming surf line on water edges
+    if (style.foam && size >= 10) {
+      ctx.lineWidth = Math.max(1, w * 0.4);
+      ctx.strokeStyle = style.foam;
+      ctx.beginPath();
+      const foamOffset = w + 1;
+      if (n.edge === "north") {
+        ctx.moveTo(px + 2, py + foamOffset);
+        ctx.lineTo(px + size - 2, py + foamOffset);
+      } else if (n.edge === "east") {
+        ctx.moveTo(px + size - foamOffset, py + 2);
+        ctx.lineTo(px + size - foamOffset, py + size - 2);
+      } else if (n.edge === "south") {
+        ctx.moveTo(px + 2, py + size - foamOffset);
+        ctx.lineTo(px + size - 2, py + size - foamOffset);
+      } else {
+        ctx.moveTo(px + foamOffset, py + 2);
+        ctx.lineTo(px + foamOffset, py + size - 2);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function terrainRadarColor(terrain: string): string {
+  switch (terrain) {
+    case "Forest": return "#35703a";
+    case "Hills": return "#8a7a4f";
+    case "Desert": return "#d6b46c";
+    case "Swamp": return "#4a6b3a";
+    case "Water": return "#2a6f9c";
+    case "River": return "#3b93bd";
+    case "Mountain": return "#828d99";
+    default: return "#64884a";
+  }
+}
+
+function resourceColor(resource: string): string {
+  switch (resource) {
+    case "Steel": return "#cbd5e1";
+    case "Coal": return "#94a3b8";
+    case "Crystal": return "#22d3ee";
+    default: return COLORS.ore;
+  }
+}
+
 function isUnit(e: Entity): boolean {
   return [
     "Infantry",
@@ -663,34 +1047,34 @@ export function isBuildingPlacable(
   const idx = ty * MAP + tx;
   if (world.passable.length > 0 && !world.passable[idx]) return false;
 
-  // Check if tile has an existing building
+  // Buildings and friendly units both reserve their current tile. The sim
+  // applies the same rule; treating a unit as an open construction site makes
+  // the placement ghost lie during a crowded turn.
   for (const e of world.entities.values()) {
-    if (BUILDING_KINDS.has(e.kind)) {
-      if (Math.floor(e.x) === tx && Math.floor(e.y) === ty) {
-        return false;
-      }
+    if (
+      Math.floor(e.x) === tx
+      && Math.floor(e.y) === ty
+      && (BUILDING_KINDS.has(e.kind) || isUnit(e))
+    ) {
+      return false;
     }
   }
 
-  // Check if tile has ore or crystal
-  const ore = world.oreTiles.get(`${tx},${ty}`);
-  if (ore && ore.amount > 0) return false;
-  const crystal = world.crystalTiles.get(`${tx},${ty}`);
-  if (crystal && crystal.amount > 0) return false;
+  const resource = world.resourceTiles.get(`${tx},${ty}`)
+    ?? (world.oreTiles.get(`${tx},${ty}`)
+      ? { resource: "Ore" as const, amount: world.oreTiles.get(`${tx},${ty}`)!.amount, infinite: true }
+      : world.crystalTiles.get(`${tx},${ty}`)
+        ? { resource: "Crystal" as const, amount: world.crystalTiles.get(`${tx},${ty}`)!.amount, infinite: true }
+        : null);
+  const hasResource = resource != null && (resource.infinite === true || resource.amount > 0);
 
-  // Refineries must touch their resource field (they are exempt from the
-  // base-clump rule; remote pockets are the expansion mechanic).
+  // A generic refinery occupies the live deposit tile. Every resource type is
+  // valid; the server remains authoritative if the deposit was just claimed
+  // by another command.
   if (btype === "Refinery" || btype === "CrystalRefinery") {
-    const fields = btype === "Refinery" ? world.oreTiles : world.crystalTiles;
-    let touches = false;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-      const f = fields.get(`${tx + dx},${ty + dy}`);
-      if (f && f.amount > 0) {
-        touches = true;
-        break;
-      }
-    }
-    if (!touches) return false;
+    if (!hasResource) return false;
+  } else if (hasResource) {
+    return false;
   } else {
     // Check distance to nearest own building (within 5 tiles Euclidean)
     const PLACE_RADIUS_SQ = 25; // 5^2
@@ -720,9 +1104,9 @@ export function isBuildingPlacable(
     if (!hasLab) return false;
   }
 
-  // Check if player has enough ore
-  const cost = BUILD_COSTS[btype] ?? 0;
-  if (world.ore < cost) return false;
+  // Check the complete four-resource price, not just the legacy ore scalar.
+  const cost = BUILD_COSTS[btype] ?? { ore: 0, steel: 0, coal: 0, crystal: 0 };
+  if (!resourceBundleAffordable(world.resources, cost)) return false;
 
   return true;
 }

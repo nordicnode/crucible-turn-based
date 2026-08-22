@@ -16,8 +16,7 @@ fn config() -> GameConfig {
 fn economy_and_production_scale_by_turn_60() {
     let mut g = crucible_sim::Game::new(Map::generate(42), config());
     let mut bot = easy();
-    let ore_before: i32 = g.map.ore.iter().sum();
-
+    let ore_markers_before = g.map.ore.clone();
     // Drive P0 with the easy bot for 60 own turns; P1 just passes so the
     // match never ends early.
     while g.turn <= 60 && !g.is_over() {
@@ -48,12 +47,20 @@ fn economy_and_production_scale_by_turn_60() {
         "economy did not reach a combat force by turn 60 (got {units})"
     );
 
-    // Refinery drain must have actually depleted the ore fields (not just the
-    // HQ trickle).
-    let ore_mined = ore_before - g.map.ore.iter().sum::<i32>();
+    // Deposits are static and inexhaustible: extraction increases the
+    // stockpile/income but never mutates the map marker or richness tier.
+    assert_eq!(
+        g.map.ore, ore_markers_before,
+        "ore deposit markers changed despite infinite-deposit rules"
+    );
+    let income = g.resource_income(Player::P0);
     assert!(
-        ore_mined >= 300,
-        "economy extracted too little ore by turn 60 (mined {ore_mined})"
+        income.total_value() > crucible_sim::HQ_INCOME_PER_TURN,
+        "refinery did not add richness-scaled income by turn 60: {income:?}"
+    );
+    assert!(
+        g.resources(Player::P0).total_value() > config().starting_ore,
+        "economy accumulated no resources by turn 60"
     );
 }
 

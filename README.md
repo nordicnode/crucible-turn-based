@@ -69,19 +69,23 @@ in any order, then end your turn.
   Barracks, Factory, TechLab, Airfield, Radar, TeslaCoil, and Turret.
   Buildings must be placed within a few tiles of an existing one, so your base
   grows as a connected clump (the placement ghost turns green when the spot is
-  valid, red when it isn't). A **Refinery must sit next to an ore field** — ore
-  is only worth anything where a refinery can drain it.
+  valid, red when it isn't). A **Refinery is built directly on a resource tile**
+  — it extracts that tile's resource every turn, scaled by the deposit's
+  richness (poor / standard / rich).
 - **Train & research.** Select a production building to queue units (Barracks →
-  Infantry; Factory → Tank / Artillery / MammothTank; Airfield → Gunship /
-  Interceptor). Select a TechLab to research one of three upgrades. Select any
-  building to repair or sell it.
+  Infantry / Scout / RocketTrooper; Factory → Tank / Artillery / MammothTank /
+  SamLauncher; Airfield → Gunship / Interceptor). Select a TechLab to open the
+  research tree (10 technologies across multiple tiers). Select any building
+  to repair or sell it.
 - **Power.** The HQ and PowerPlants produce power; Refineries, Barracks,
   Factories, TechLabs, Airfields, Radar, and Turrets consume it. If consumption
   ever exceeds production, your production queues only advance every other
   turn — build a PowerPlant to lift the cap, the same way the AI does.
-- **Economy.** Ore arrives passively: the HQ banks a small trickle each turn,
-  and each refinery drains up to 60 ore per turn from the ore tiles adjacent to
-  it (income reads `+N` from the accumulated drain). No refineries, no income.
+- **Economy.** Four resources — **Ore, Steel, Coal, Crystal** — are extracted
+  by refineries built directly on infinite deposit tiles. Each deposit has a
+  richness tier (poor / standard / rich) that scales the per-turn yield. The HQ
+  banks a small ore trickle each turn; every refinery adds its resource's
+  richness-scaled yield. No refineries, no income beyond the HQ trickle.
 - **Fog of war.** You see only tiles near your own units and buildings. Enemy
   sightings fade after 6 turns unseen, so scouting matters — especially the
   passive Radar dish, which reveals a huge swath of the battlefield.
@@ -92,9 +96,11 @@ equal).
 
 ## The game
 
-One resource (ore), ten buildings (HQ, PowerPlant, Refinery, Barracks, Factory,
-TechLab, Airfield, Radar, TeslaCoil, Turret), and six units on procedurally
-generated 64×64 maps:
+Four resources (Ore, Steel, Coal, Crystal), twelve buildings (HQ, PowerPlant,
+Refinery, Barracks, Factory, TechLab, Airfield, Radar, TeslaCoil, Turret,
+AATurret, CrystalRefinery), and nine units on procedurally generated 64×64 maps
+with typed terrain (plains, forest, hills, desert, swamp, rivers, lakes,
+mountains):
 
 | Unit | Cost | HP | Dmg | Range | MP | Build | Notes |
 |---|---|---|---|---|---|---|---|
@@ -115,10 +121,30 @@ both fire automatically once at the end of your turn.
 Combat is deterministic Advance-Wars-style: damage scales with the attacker's
 remaining HP, and a defender in range counterattacks once. There is no
 randomness in a battle — the seeded PRNG exists only for map generation. Maps
-are point-symmetric (spawn fairness is a theorem) with rich ore-field cores,
-occasional mid-field rocks for cover, and varied expansion-site sizes. The
-engine runs on strictly alternating turns with no wall clock and no in-game
-RNG, and is fully deterministic and server-authoritative.
+are asymmetric but constraint-scored: the generator rejects candidates that
+fail route-cost parity, resource roster, or terrain-variety gates. Terrain
+affects movement cost, defense, and passability — forests give cover, hills
+grant defense bonuses, rivers slow crossings, and mountains/lakes are
+impassable. The engine runs on strictly alternating turns with no wall clock
+and no in-game RNG, and is fully deterministic and server-authoritative.
+
+The generator uses a full climate model: elevation, moisture, and a new
+temperature field (latitude + elevation cooling + regional noise) drive the
+biomes, so polar latitudes read as tundra, equatorial belts as jungle, and
+mountain ridges as rock. Rivers follow the elevation field downhill (steepest
+descent, pooling into lakes at local minima), mountain chains meander along
+tectonic splines with fault branches, and spawn rings take their biome palette
+from the local climate. Resource deposits correlate with terrain — steel in
+hills, coal in deserts, crystal in forests.
+
+Quality-of-life and production features: a right-side command rail, tile
+inspector with climate readouts, build-tree tab in the research bureau,
+movement-path preview with MP cost on hover, fog-of-war reveal fade,
+stacking badges, floating damage numbers, keyboard-shortcut overlay,
+touch support, adaptive AI difficulty (remembers your recent results),
+replay sharing via `?replay=<id>` URL, and save/resume: a disconnect
+mid-match snapshots the game, and the lobby's **Resume Saved Match** button
+continues it server-side.
 
 ## Training the AI
 

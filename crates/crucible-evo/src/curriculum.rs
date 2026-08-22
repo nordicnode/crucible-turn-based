@@ -90,8 +90,8 @@ impl Default for CurriculumConfig {
     fn default() -> Self {
         CurriculumConfig {
             es: EsParams::default(),
-            gens_per_stage: 4,
-            seeds_per_generation: 2,
+            gens_per_stage: 6,
+            seeds_per_generation: 4,
             match_timeout_turns: 45,
             shaping_turns: 30,
             master_seed: 0xB007_57A6,

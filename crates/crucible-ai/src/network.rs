@@ -20,24 +20,24 @@ pub const HIDDEN2: usize = 48;
 /// Genome schema version. Bumped on every change to the encoding; stored
 /// genomes with a different version are invalid.
 ///
-/// v7 (research cutover): the 4-slot tech head now scores technologies
-/// (`StartResearch`) instead of the old damage/hp/range upgrades, the
-/// upgrade one-hot feature became research state (points / researching /
-/// researched-count / crystal), and the reserved feature slots now carry
-/// the new units & buildings (scouts, rocket troopers, SAM launchers,
-/// crystal refineries, AA turrets).
-pub const GENOME_SCHEMA_VERSION: u32 = 7;
+/// v8 (multi-resource economy): the turn-based research schema is retained,
+/// while the feature vector gains separate Steel/Coal stockpiles and generic
+/// resource-income signals for durable deposit/refinery play.
+/// v9: the tech head expands from 4 to 10 slots so the learned policy can
+/// research the full tree (RocketPropulsion, TitaniumAlloys, etc.).
+/// v10: build/train heads cover the complete expanded content roster.
+pub const GENOME_SCHEMA_VERSION: u32 = 10;
 
-/// Output head layout (see `decision.rs`).
-pub const BUILD_OUT: usize = 8;
-/// Train slots: infantry, tank, artillery, mammoth, gunship, interceptor
-/// (the learned policy keeps the classic six; the scripted bots field the
-/// full roster).
-pub const TRAIN_OUT: usize = 6;
+/// Output head layout (see `decision.rs`). All non-HQ playable structures are
+/// represented, including both refinery wire names for replay compatibility.
+pub const BUILD_OUT: usize = 11;
+/// Every playable unit has a learned train slot.
+pub const TRAIN_OUT: usize = 9;
 /// Army-wide actions: attack-move, defend, scout, and focus-fire (snipe).
 pub const ARMY_ACTION_OUT: usize = 4;
 pub const SECTOR_OUT: usize = 64;
-pub const TECH_OUT: usize = 4;
+/// All 10 technologies are now in the learned action space (schema v9).
+pub const TECH_OUT: usize = 10;
 /// Snipe target-type head (used only when the army action is `Snipe`):
 /// enemy tank, refinery, HQ, or factory.
 pub const SNIPE_OUT: usize = 4;
@@ -161,13 +161,11 @@ mod tests {
 
     #[test]
     fn genome_len_matches_layer_sizes() {
-        // FEATURE_DIM is 224 with the plan §5.2 history embedding (2 stacked
-        // turns): W1 = 224*48, W3 = 48*90 (TRAIN_OUT dropped to 6 in the
-        // turn-based schema; the snipe head keeps its 4 target outputs and
-        // the army head its 4 actions).
-        assert_eq!(OUTPUT, 90);
-        assert_eq!(GENOME_LEN, 224 * 48 + 48 + 48 * 48 + 48 + 48 * 90 + 90);
-        assert_eq!(GENOME_LEN, 17_562);
+        // FEATURE_DIM is 240 with the two-activation history embedding and
+        // the complete expanded build/train/tech action heads.
+        assert_eq!(OUTPUT, 102);
+        assert_eq!(GENOME_LEN, 240 * 48 + 48 + 48 * 48 + 48 + 48 * 102 + 102);
+        assert_eq!(GENOME_LEN, 18_918);
     }
 
     #[test]

@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { MAP_SIZE, MAP_TILES } from "./types";
 import { applyFrame, applyMeta, type ReplayFrame, type ReplayMeta } from "./snapshot";
 import { World } from "./world";
 
 function metaFixture(): ReplayMeta {
-  const passable = new Array<boolean>(64 * 64).fill(true);
-  const ore = new Array<number>(64 * 64).fill(0);
-  ore[10 * 64 + 10] = 400;
-  const crystal = new Array<number>(64 * 64).fill(0);
-  crystal[20 * 64 + 20] = 150;
+  const passable = new Array<boolean>(MAP_TILES).fill(true);
+  const ore = new Array<number>(MAP_TILES).fill(0);
+  ore[10 * MAP_SIZE + 10] = 400;
+  const crystal = new Array<number>(MAP_TILES).fill(0);
+  crystal[20 * MAP_SIZE + 20] = 150;
   return {
     map_seed: 7,
     passable,
@@ -33,7 +34,7 @@ describe("snapshot mapping", () => {
       [8, 8],
       [55, 55],
     ]);
-    expect(w.visible.size).toBe(64 * 64);
+    expect(w.visible.size).toBe(MAP_TILES);
     expect(w.oreTiles.get("10,10")).toEqual({ x: 10, y: 10, amount: 400 });
   });
 

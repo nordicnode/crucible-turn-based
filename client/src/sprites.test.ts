@@ -3,13 +3,21 @@ import { fx } from "./fx";
 import { Camera } from "./renderer";
 import {
   drawBuildingSprite,
+  drawCivUnGreyOverlay,
+  drawDesertTile,
+  drawForestTile,
   drawHealthBar,
+  drawHillsTile,
   drawImpassableTile,
+  drawMountainTile,
   drawOreDeposit,
   drawPassableTile,
+  drawRiverTile,
   drawSelectionReticle,
+  drawSwampTile,
   drawTacticalIcon,
   drawUnitSprite,
+  drawWaterTile,
   getCursorDataUrl,
   getTeamPalette,
   getThumbnailDataUrl,
@@ -17,6 +25,7 @@ import {
   TEAM_RED,
   TEAM_STALE,
 } from "./sprites";
+import { PLAYABLE_BUILDING_TYPES, PLAYABLE_UNIT_TYPES } from "./types";
 
 class MockCanvasContext {
   fillStyle: string | CanvasGradient | CanvasPattern = "";
@@ -66,20 +75,51 @@ describe("Terrain sprite rendering", () => {
     expect(() => drawPassableTile(ctx, 5, 10, 50, 100, 18, true)).not.toThrow();
   });
 
+  it("renders full-tile water and rivers with animated ticks", () => {
+    expect(() => drawWaterTile(ctx, 3, 4, 30, 40, 24, false, 10)).not.toThrow();
+    expect(() => drawWaterTile(ctx, 3, 4, 30, 40, 24, true, 10)).not.toThrow();
+    expect(() => drawRiverTile(ctx, 5, 6, 50, 60, 24, false, 15)).not.toThrow();
+    expect(() => drawRiverTile(ctx, 5, 6, 50, 60, 24, true, 15)).not.toThrow();
+  });
+
+  it("renders forest, hills, desert, swamp, and mountain biomes", () => {
+    expect(() => drawForestTile(ctx, 1, 2, 10, 20, 20, false)).not.toThrow();
+    expect(() => drawForestTile(ctx, 1, 2, 10, 20, 20, true)).not.toThrow();
+    expect(() => drawHillsTile(ctx, 2, 3, 20, 30, 20, false)).not.toThrow();
+    expect(() => drawHillsTile(ctx, 2, 3, 20, 30, 20, true)).not.toThrow();
+    expect(() => drawDesertTile(ctx, 3, 4, 30, 40, 20, false)).not.toThrow();
+    expect(() => drawDesertTile(ctx, 3, 4, 30, 40, 20, true)).not.toThrow();
+    expect(() => drawSwampTile(ctx, 4, 5, 40, 50, 20, false)).not.toThrow();
+    expect(() => drawSwampTile(ctx, 4, 5, 40, 50, 20, true)).not.toThrow();
+    expect(() => drawMountainTile(ctx, 5, 6, 50, 60, 20, false)).not.toThrow();
+    expect(() => drawMountainTile(ctx, 5, 6, 50, 60, 20, true)).not.toThrow();
+  });
+
   it("renders impassable tiles for active and fogged views", () => {
     expect(() => drawImpassableTile(ctx, 8, 12, 80, 120, 18, false)).not.toThrow();
     expect(() => drawImpassableTile(ctx, 8, 12, 80, 120, 18, true)).not.toThrow();
   });
 
-  it("renders ore deposits at varying depletion amounts", () => {
+  it("renders ore deposits at varying richness tiers", () => {
     expect(() => drawOreDeposit(ctx, 100, 100, 18, 500, 10)).not.toThrow();
     expect(() => drawOreDeposit(ctx, 100, 100, 18, 100, 10)).not.toThrow();
   });
 });
 
+describe("Civilization-style un-greying construction rendering", () => {
+  const ctx = new MockCanvasContext() as unknown as CanvasRenderingContext2D;
+
+  it("renders construction wipe overlay across turn progress (0/3, 1/3, 2/3, 3/3)", () => {
+    expect(() => drawCivUnGreyOverlay(ctx, 50, 50, 30, 30, 0, 3, 5)).not.toThrow();
+    expect(() => drawCivUnGreyOverlay(ctx, 50, 50, 30, 30, 1, 3, 10)).not.toThrow();
+    expect(() => drawCivUnGreyOverlay(ctx, 50, 50, 30, 30, 2, 3, 15)).not.toThrow();
+    expect(() => drawCivUnGreyOverlay(ctx, 50, 50, 30, 30, 3, 3, 20)).not.toThrow();
+  });
+});
+
 describe("Building sprite rendering", () => {
   const ctx = new MockCanvasContext() as unknown as CanvasRenderingContext2D;
-  const buildings = ["Hq", "PowerPlant", "Refinery", "Barracks", "Factory", "TechLab", "Airfield", "Turret"];
+  const buildings = PLAYABLE_BUILDING_TYPES;
 
   for (const b of buildings) {
     it(`renders ${b} for P0, P1, and stale state`, () => {
@@ -88,15 +128,17 @@ describe("Building sprite rendering", () => {
       expect(() => drawBuildingSprite(ctx, b, 100, 100, 18, 1, 0, 5, true)).not.toThrow();
     });
 
-    it(`renders ${b} with active production progress bar`, () => {
-      expect(() => drawBuildingSprite(ctx, b, 100, 100, 18, 0, 0, 5, false, 50, 100)).not.toThrow();
+    it(`renders ${b} with Civilization un-grey construction progression`, () => {
+      expect(() => drawBuildingSprite(ctx, b, 100, 100, 18, 0, 0, 5, false, 0, 2)).not.toThrow();
+      expect(() => drawBuildingSprite(ctx, b, 100, 100, 18, 0, 0, 5, false, 1, 2)).not.toThrow();
+      expect(() => drawBuildingSprite(ctx, b, 100, 100, 18, 0, 0, 5, false, 2, 2)).not.toThrow();
     });
   }
 });
 
 describe("Unit sprite rendering", () => {
   const ctx = new MockCanvasContext() as unknown as CanvasRenderingContext2D;
-  const units = ["Infantry", "Tank", "Artillery", "MammothTank", "Gunship", "Interceptor"];
+  const units = PLAYABLE_UNIT_TYPES;
 
   for (const u of units) {
     it(`renders ${u} with direction and owner`, () => {
@@ -105,6 +147,12 @@ describe("Unit sprite rendering", () => {
       expect(() => drawUnitSprite(ctx, u, 50, 50, 18, 1, 0, 10, true)).not.toThrow();
     });
   }
+
+  it("renders units undergoing construction with Civilization un-grey overlay", () => {
+    expect(() => drawUnitSprite(ctx, "Tank", 50, 50, 18, 0, 0, 10, false, -1, false, 0, 2)).not.toThrow();
+    expect(() => drawUnitSprite(ctx, "Tank", 50, 50, 18, 0, 0, 10, false, -1, false, 1, 2)).not.toThrow();
+    expect(() => drawUnitSprite(ctx, "Tank", 50, 50, 18, 0, 0, 10, false, -1, false, 2, 2)).not.toThrow();
+  });
 
   it("renders Tank with active firing recoil and muzzle blast", () => {
     expect(() => drawUnitSprite(ctx, "Tank", 50, 50, 18, 0, 0, 10, false, 0, false)).not.toThrow();
@@ -136,9 +184,11 @@ describe("Unit sprite rendering", () => {
 describe("Thumbnails and Tactical Icons", () => {
   const ctx = new MockCanvasContext() as unknown as CanvasRenderingContext2D;
 
-  it("generates thumbnail data URLs for buildings and units", () => {
-    const url = getThumbnailDataUrl("Tank", 0);
-    expect(typeof url).toBe("string");
+  it("generates a stable asset URL for every playable building and unit", () => {
+    for (const kind of [...PLAYABLE_BUILDING_TYPES, ...PLAYABLE_UNIT_TYPES]) {
+      const url = getThumbnailDataUrl(kind, 0);
+      expect(url).toBe(`/assets/units/${kind.toLowerCase()}.svg`);
+    }
   });
 
   it("renders tactical icons without throwing", () => {

@@ -1,14 +1,15 @@
 //! Ghosts: frozen opponents reconstructed from a recorded match's input log.
 //! A ghost replays one side's command stream (with entity-id remapping so its
 //! build/attack references stay correct against a new opponent), plus the pool
-//! policy that keeps recent/champion-beating human matches weighted higher.
+//! policy that keeps recent, difficult, and champion-beating human matches
+//! weighted higher.
 //!
 //! Pure — depends only on `crucible-sim`/`crucible-ai`. Immutability: the same
 //! inputs always produce the same commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crucible_ai::{Bot, DetailedOutcome, GenomeBot, MatchOutcome};
+use crucible_ai::{drive_bot_turn, Bot, DetailedOutcome, GenomeBot, MatchOutcome};
 use crucible_sim::{Command, EntityId, Game, GameConfig, Map, Player, Replay, TimedCommand};
 
 use crate::fitness::shaped_fitness;
@@ -27,16 +28,6 @@ pub struct Ghost {
     /// creation rank keeps the reference coherent in a byte-identical match
     /// and drops it gracefully (a skipped attack) against a divergent one.
     enemy_index: HashMap<EntityId, usize>,
-    /// Every own entity id the ghost has *ever* seen in the current fresh
-    /// match, in creation order (id-sorted). Dead entities keep their slot,
-    /// so `own_index` ranks map onto the k-th created entity even after
-    /// casualties — a live-only snapshot would silently misalign.
-    known_own: Vec<EntityId>,
-    /// Same contract for the enemy side. Attacks remap their target through
-    /// `enemy_index`; a live-only list is wrong the moment the enemy suffers
-    /// any casualty (ranks shift by the deaths), so targets of later attacks
-    /// silently got dropped once an earlier enemy unit died.
-    known_enemy: Vec<EntityId>,
     cursor: usize,
 }
 
@@ -55,49 +46,22 @@ impl Ghost {
         // log order IS the replay order — no re-sort needed.
 
         // Reconstruct the ghost's entity creation order by re-running the
-        // original match and unioning the ids of *every* entity the ghost
-        // ever created — survivors and those later destroyed or sold. Ids are
-        // allocated strictly ascending, so sorting the union yields creation
-        // order, which is the order a fresh match creates the ghost's
-        // entities too. (A survivors-only snapshot was wrong: commands
-        // referencing units that died in the original match were dropped, and
-        // survivors were mapped to the wrong creation rank whenever the two
-        // matches' live sets differed.)
+        // original input log. The sim keeps an all-time allocator history,
+        // so death/sell cannot make a later command shift onto the wrong
+        // creation rank.
         let mut game = Game::new(Map::generate(replay.map_seed), replay.config.clone());
-        let mut created: HashSet<EntityId> = HashSet::new();
-        let mut owners: HashMap<EntityId, Player> = HashMap::new();
-        {
-            let mut capture = |g: &Game| {
-                for u in &g.units {
-                    created.insert(u.id);
-                    owners.insert(u.id, u.owner);
-                }
-                for b in &g.buildings {
-                    created.insert(b.id);
-                    owners.insert(b.id, b.owner);
-                }
-            };
-            // Re-run the full match exactly as `serialize::replay_to_game`
-            // does, capturing after every command application. Commands
-            // execute immediately in log order; `EndTurn` entries drive the
-            // turn lifecycle.
-            capture(&game);
-            for cmd in &replay.commands {
-                if game.is_over() {
-                    break;
-                }
-                game.apply_commands(cmd.player, std::slice::from_ref(&cmd.command));
-                capture(&game);
+        for cmd in &replay.commands {
+            if game.is_over() {
+                break;
             }
+            game.apply_commands(cmd.player, std::slice::from_ref(&cmd.command));
         }
         let index_of = |side: Player| -> HashMap<EntityId, usize> {
-            let mut ids: Vec<EntityId> = created
-                .iter()
-                .filter(|&&id| owners.get(&id) == Some(&side))
-                .copied()
-                .collect();
-            ids.sort_unstable();
-            ids.iter().enumerate().map(|(i, &id)| (id, i)).collect()
+            game.entity_ids_in_creation_order(side)
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| (id, i))
+                .collect()
         };
         let own_index = index_of(player);
         let enemy_index = index_of(player.enemy());
@@ -107,8 +71,6 @@ impl Ghost {
             commands,
             own_index,
             enemy_index,
-            known_own: Vec::new(),
-            known_enemy: Vec::new(),
             cursor: 0,
         }
     }
@@ -123,26 +85,11 @@ impl Ghost {
 
     pub fn reset(&mut self) {
         self.cursor = 0;
-        self.known_own.clear();
-        self.known_enemy.clear();
     }
 
-    /// The ghost's own entities in creation order (sorted by id).
+    /// The ghost's entities in creation order, including dead/sold ids.
     fn current_entities(&self, game: &Game, player: Player) -> Vec<EntityId> {
-        let mut ids: Vec<EntityId> = game
-            .units
-            .iter()
-            .filter(|u| u.owner == player)
-            .map(|u| u.id)
-            .chain(
-                game.buildings
-                    .iter()
-                    .filter(|b| b.owner == player)
-                    .map(|b| b.id),
-            )
-            .collect();
-        ids.sort_unstable();
-        ids
+        game.entity_ids_in_creation_order(player)
     }
 
     fn remap(
@@ -185,6 +132,16 @@ impl Ghost {
                     waypoint: *waypoint,
                 })
             }
+            ClearMove { units, .. } => {
+                let mut new_units = Vec::with_capacity(units.len());
+                for id in units {
+                    new_units.push(at_own(id)?);
+                }
+                Some(ClearMove {
+                    player,
+                    units: new_units,
+                })
+            }
             Attack { units, target, .. } => {
                 let mut new_units = Vec::with_capacity(units.len());
                 for id in units {
@@ -220,25 +177,11 @@ impl Bot for Ghost {
 
     fn decide(&mut self, game: &Game, player: Player) -> Vec<Command> {
         let mut out = Vec::new();
-        // Grow the all-time own creation list with any newly visible own
-        // entities (ids ascend, so id-sorted order is creation order; dead
-        // entities keep their slots). Commands referencing entities created
-        // by the current turn's commands fire next turn at the earliest, so
-        // the list is complete for everything the cursor can reach.
-        let live_own = self.current_entities(game, player);
-        for id in live_own.iter().copied() {
-            if !self.known_own.contains(&id) {
-                self.known_own.push(id);
-            }
-        }
-        self.known_own.sort_unstable();
-        let live_enemy = self.current_entities(game, player.enemy());
-        for id in live_enemy.into_iter() {
-            if !self.known_enemy.contains(&id) {
-                self.known_enemy.push(id);
-            }
-        }
-        self.known_enemy.sort_unstable();
+        // Use the sim's all-time creation history rather than the live
+        // entity vectors. Dead entities retain their slots, and the same
+        // creation rank is therefore available even after casualties.
+        let own = self.current_entities(game, player);
+        let enemy = self.current_entities(game, player.enemy());
         // Fire every recorded command whose turn has arrived (turns only move
         // forward; the ghost's cursor never rewinds within a match).
         while self.cursor < self.commands.len() {
@@ -246,7 +189,7 @@ impl Bot for Ghost {
             if tc.turn > game.turn {
                 break;
             }
-            if let Some(cmd) = self.remap(&tc.command, &self.known_own, &self.known_enemy, player) {
+            if let Some(cmd) = self.remap(&tc.command, &own, &enemy, player) {
                 out.push(cmd);
             }
             self.cursor += 1;
@@ -257,13 +200,12 @@ impl Bot for Ghost {
 
 /// Run one match: the ghost plays its recorded side (P0), a bot plays P1.
 ///
-/// Both sides are polled once per own turn (the game is strictly
-/// alternating); the ghost fires its recorded commands when the turn cursor
-/// reaches them. The opponent bot keeps the normal per-turn cadence.
+/// Both sides are polled once per own activation; the ghost fires its
+/// recorded commands when the turn cursor reaches them. The opponent bot
+/// keeps the normal per-activation cadence, and the shared driver guarantees
+/// that a missing EndTurn advances exactly once.
 fn run_ghost_match(ghost: &mut Ghost, bot: &mut dyn Bot, config: &GameConfig) -> DetailedOutcome {
     let mut game = Game::new(Map::generate(ghost.map_seed()), config.clone());
-    // Deadlock guard only: an unlimited config must not truncate the ghost's
-    // recorded command stream.
     let max_turns = if config.timeout_turns > 0 {
         config.timeout_turns + 100
     } else {
@@ -272,15 +214,9 @@ fn run_ghost_match(ghost: &mut Ghost, bot: &mut dyn Bot, config: &GameConfig) ->
     while !game.is_over() && game.turn <= max_turns {
         let active = game.active;
         if active == Player::P0 {
-            let ghost_cmds = ghost.decide(&game, Player::P0);
-            game.apply_commands(Player::P0, &ghost_cmds);
+            drive_bot_turn(&mut game, active, ghost);
         } else {
-            let bot_cmds = bot.decide(&game, Player::P1);
-            game.apply_commands(Player::P1, &bot_cmds);
-        }
-        // Guarantee progress even if a policy forgets EndTurn.
-        if game.active == active && !game.is_over() {
-            game.end_turn();
+            drive_bot_turn(&mut game, active, bot);
         }
     }
     DetailedOutcome {
@@ -288,6 +224,7 @@ fn run_ghost_match(ghost: &mut Ghost, bot: &mut dyn Bot, config: &GameConfig) ->
             winner: game.winner,
             reason: game.win_reason,
             duration_turns: game.turn,
+            duration_rounds: game.round,
         },
         p0_value: game.remaining_value(Player::P0),
         p1_value: game.remaining_value(Player::P1),
@@ -313,11 +250,15 @@ pub struct GhostEntry {
     pub id: u64,
     pub ghost: Ghost,
     pub beat_champion: bool,
+    /// Deterministic difficulty/teaching priority derived from the stored
+    /// human result and opponent. Higher values are sampled and retained more
+    /// often than routine games.
+    pub priority: u32,
     pub recency: u64,
 }
 
-/// The ghost pool: recent human matches weighted higher, champion-beaters
-/// retained, trimmed to a maximum size.
+/// The ghost pool: recent and difficult human matches weighted higher,
+/// champion-beaters retained, trimmed to a maximum size.
 #[derive(Clone, Debug, Default)]
 pub struct GhostPool {
     entries: Vec<GhostEntry>,
@@ -342,25 +283,50 @@ impl GhostPool {
         self.entries.is_empty()
     }
 
+    /// Add a routine-priority ghost. Kept for callers that do not have match
+    /// metadata; trainer ingestion uses [`Self::add_scored`].
     pub fn add(&mut self, id: u64, ghost: Ghost, beat_champion: bool) {
+        self.add_scored(id, ghost, beat_champion, 1);
+    }
+
+    /// Add or refresh one ghost with a deterministic teaching priority. Match
+    /// ids are unique, so repeated startup/refresh loads are idempotent.
+    pub fn add_scored(&mut self, id: u64, ghost: Ghost, beat_champion: bool, priority: u32) {
+        if self.max_size == 0 {
+            return;
+        }
+        if let Some(existing) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            existing.beat_champion |= beat_champion;
+            existing.priority = existing.priority.max(priority);
+            return;
+        }
         self.entries.push(GhostEntry {
             id,
             ghost,
             beat_champion,
+            priority: priority.max(1),
             recency: self.next_recency,
         });
         self.next_recency += 1;
-        // Trim to `max_size`, evicting the oldest **non-beater** first: the
-        // pool policy promises champion-beaters are retained, so a burst of
-        // ordinary matches must not push out the one strategy that beat the
-        // champion. Only when the pool is entirely beaters does the oldest
-        // beater give way.
+        // Trim to `max_size`, evicting the lowest-priority **non-beater**;
+        // ties evict the oldest. Champion-beaters are retained against a
+        // flood of ordinary games, while a full beater pool still ages out.
         while self.entries.len() > self.max_size {
             let evict = self
                 .entries
                 .iter()
-                .position(|e| !e.beat_champion)
-                .unwrap_or(0);
+                .enumerate()
+                .filter(|(_, entry)| !entry.beat_champion)
+                .min_by_key(|(_, entry)| (entry.priority, entry.recency))
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, entry)| (entry.priority, entry.recency))
+                        .map(|(index, _)| index)
+                        .unwrap_or(0)
+                });
             self.entries.remove(evict);
         }
     }
@@ -372,26 +338,63 @@ impl GhostPool {
         v.into_iter().map(|e| e.ghost.clone()).collect()
     }
 
-    /// Sample up to `n` ghosts, weighted by recency (recent = higher weight),
-    /// without replacement.
+    /// Sample up to `n` ghosts, weighted by priority and recency, without
+    /// replacement.
     pub fn sample(&self, rng: &mut crucible_sim::Rng, n: usize) -> Vec<Ghost> {
-        let n = n.min(self.entries.len());
-        if n == 0 {
-            return Vec::new();
-        }
-        let mut idx: Vec<usize> = (0..self.entries.len()).collect();
+        self.sample_where(rng, n, |_| true)
+    }
+
+    /// Sample only ordinary ghosts. This lets callers reserve the explicit
+    /// champion-beater prefix without returning a duplicate entry.
+    pub fn sample_non_beaters(&self, rng: &mut crucible_sim::Rng, n: usize) -> Vec<Ghost> {
+        self.sample_where(rng, n, |entry| !entry.beat_champion)
+    }
+
+    /// Number of retained champion-beating entries.
+    pub fn champion_beater_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.beat_champion)
+            .count()
+    }
+
+    /// Number of entries at or above a teaching-priority threshold.
+    pub fn priority_count(&self, threshold: u32) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.priority >= threshold)
+            .count()
+    }
+
+    fn sample_where(
+        &self,
+        rng: &mut crucible_sim::Rng,
+        n: usize,
+        include: impl Fn(&GhostEntry) -> bool,
+    ) -> Vec<Ghost> {
+        let mut idx: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| include(entry))
+            .map(|(index, _)| index)
+            .collect();
+        let n = n.min(idx.len());
         let mut out = Vec::with_capacity(n);
         while out.len() < n {
-            let total: u64 = idx.iter().map(|&i| self.entries[i].recency + 1).sum();
-            let mut pick = rng.below(total);
+            let total: u64 = idx
+                .iter()
+                .map(|&i| (self.entries[i].priority as u64) * 16 + self.entries[i].recency + 1)
+                .sum();
+            let mut pick = rng.below(total.max(1));
             let mut chosen = 0usize;
             for (pos, &i) in idx.iter().enumerate() {
-                let w = self.entries[i].recency + 1;
-                if pick < w {
+                let weight = (self.entries[i].priority as u64) * 16 + self.entries[i].recency + 1;
+                if pick < weight {
                     chosen = pos;
                     break;
                 }
-                pick -= w;
+                pick -= weight;
             }
             out.push(self.entries[idx[chosen]].ghost.clone());
             idx.remove(chosen);
@@ -507,6 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn priority_sampling_is_deterministic_and_idempotent() {
+        let replay = sample_replay(6);
+        let g = || Ghost::from_replay(&replay, Player::P0);
+        let mut pool = GhostPool::new(3);
+        pool.add_scored(1, g(), false, 1);
+        pool.add_scored(2, g(), false, 8);
+        pool.add_scored(3, g(), true, 12);
+        // Re-reading an existing row updates metadata rather than duplicating
+        // it, which is what makes trainer startup/refresh safe to repeat.
+        pool.add_scored(2, g(), false, 10);
+        assert_eq!(pool.len(), 3);
+        assert_eq!(pool.champion_beater_count(), 1);
+
+        let mut a_rng = crucible_sim::Rng::from_seed(19);
+        let mut b_rng = crucible_sim::Rng::from_seed(19);
+        let a = pool.sample_non_beaters(&mut a_rng, 2);
+        let b = pool.sample_non_beaters(&mut b_rng, 2);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].map_seed(), b[0].map_seed());
+    }
+
+    #[test]
     fn ghost_fitness_is_deterministic() {
         let replay = sample_replay(5);
         let ghost = Ghost::from_replay(&replay, Player::P0);
@@ -547,22 +572,17 @@ mod tests {
             game.end_turn();
         }
         let hq = game.hq(Player::P0).unwrap().tile;
-        // Refinery must be ore-adjacent; find the nearest ore tile.
-        let ore_tile = (0..crucible_sim::map::MAP_TILES)
+        // A generic refinery claims the nearest live deposit tile itself.
+        let place = (0..crucible_sim::map::MAP_TILES)
             .map(crucible_sim::map::tile_coords)
-            .filter(|&t| game.map.ore_at(t.0, t.1) > 0)
-            .min_by_key(|&t| (t.0 as i32 - hq.0 as i32).abs() + (t.1 as i32 - hq.1 as i32).abs())
-            .expect("map has ore");
-        let place = [
-            (ore_tile.0 as i32 + 1, ore_tile.1 as i32),
-            (ore_tile.0 as i32 - 1, ore_tile.1 as i32),
-            (ore_tile.0 as i32, ore_tile.1 as i32 + 1),
-            (ore_tile.0 as i32, ore_tile.1 as i32 - 1),
-        ]
-        .into_iter()
-        .map(|(x, y)| (x as u8, y as u8))
-        .find(|&t| game.map.is_passable(t.0, t.1))
-        .expect("free ore-adjacent tile");
+            .filter(|&t| game.map.resource_amount_at(t.0, t.1) > 0)
+            .min_by_key(|&t| {
+                (
+                    (t.0 as i32 - hq.0 as i32).abs() + (t.1 as i32 - hq.1 as i32).abs(),
+                    crucible_sim::map::tile_index(t.0, t.1),
+                )
+            })
+            .expect("map has a resource tile");
         let cmd = Command::PlaceBuilding {
             player: Player::P0,
             btype: crucible_sim::BuildingType::Refinery,
@@ -606,13 +626,13 @@ mod tests {
 
     #[test]
     fn ghost_maps_entities_by_creation_order_not_survivors() {
-        // Drive a hard-vs-hard match so the ghost side (P0) suffers
-        // casualties, then verify the ghost can replay *every* recorded
+        // Drive a hard-vs-hard match long enough for the ghost side (P0) to
+        // suffer casualties, then verify the ghost can replay *every* recorded
         // command against a fresh, byte-identical match. The old survivor-only
         // mapping dropped commands whose target died in the original match and
         // mis-ranked survivors whenever the two matches' live sets differed.
         let cfg = GameConfig {
-            timeout_turns: 90,
+            timeout_turns: 130,
             ..GameConfig::default()
         };
         let seed = 2026u64;
@@ -620,7 +640,7 @@ mod tests {
         let mut replay = Replay::new(seed, cfg.clone());
         let mut p0 = crucible_ai::hard();
         let mut p1 = crucible_ai::hard();
-        while !game.is_over() && game.turn <= 90 {
+        while !game.is_over() && game.turn <= 130 {
             let active = game.active;
             let cmds = if active == Player::P0 {
                 p0.decide(&game, active)
@@ -662,7 +682,7 @@ mod tests {
         let mut fresh = Game::new(Map::generate(replay.map_seed), replay.config.clone());
         let mut opp = crucible_ai::hard();
         let mut emitted = 0usize;
-        while !fresh.is_over() && fresh.turn <= 90 {
+        while !fresh.is_over() && fresh.turn <= 130 {
             let active = fresh.active;
             if active == Player::P0 {
                 let cmds = g.decide(&fresh, Player::P0);

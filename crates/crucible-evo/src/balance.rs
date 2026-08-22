@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crucible_ai::{run_match, Bot};
+use crucible_sim::map::MAP_SIZE;
 use crucible_sim::{unit_stats, Game, GameConfig, Map, Player, Unit, UnitType};
 
 /// Aggregate result of a matchup over a seed set.
@@ -46,6 +47,7 @@ fn spawn_unit(g: &mut Game, p: Player, ut: UnitType, tile: (u8, u8)) {
         hp: stats.hp,
         max_hp: stats.hp,
         mp: unit_stats(ut).mp,
+        move_target: None,
         moved: false,
         acted: false,
     });
@@ -64,8 +66,8 @@ fn spawn_army(g: &mut Game, player: Player, comp: &[(UnitType, usize)]) {
             // Ring-search outward from the preferred slot for a passable,
             // unoccupied tile — the fixed offset can land on rock.
             let pref = (
-                (hq.0 as i32 + dx * 3 + (i % 5) as i32 - 2).clamp(0, 63),
-                (hq.1 as i32 + dy * 3 + (i / 5) as i32 - 2).clamp(0, 63),
+                (hq.0 as i32 + dx * 3 + (i % 5) as i32 - 2).clamp(0, MAP_SIZE as i32 - 1),
+                (hq.1 as i32 + dy * 3 + (i / 5) as i32 - 2).clamp(0, MAP_SIZE as i32 - 1),
             );
             let mut tile = None;
             'outer: for r in 0..=6i32 {
@@ -73,7 +75,7 @@ fn spawn_army(g: &mut Game, player: Player, comp: &[(UnitType, usize)]) {
                     for ddx in -r..=r {
                         let x = pref.0 + ddx;
                         let y = pref.1 + ddy;
-                        if x < 0 || y < 0 || x > 63 || y > 63 {
+                        if x < 0 || y < 0 || x >= MAP_SIZE as i32 || y >= MAP_SIZE as i32 {
                             continue;
                         }
                         let t = (x as u8, y as u8);
@@ -94,20 +96,9 @@ fn spawn_army(g: &mut Game, player: Player, comp: &[(UnitType, usize)]) {
         }
     }
 
-    let units: Vec<u32> = g
-        .units
-        .iter()
-        .filter(|u| u.owner == player)
-        .map(|u| u.id)
-        .collect();
-    let _ = g.apply_commands(
-        player,
-        &[crucible_sim::Command::MoveGroup {
-            player,
-            units,
-            waypoint: enemy,
-        }],
-    );
+    // Initial movement is issued by `micro_matchup` after both armies have
+    // been spawned. That keeps the setup legal under the alternating-turn
+    // validator (a P1 order cannot be applied while P0 is active).
 }
 
 /// Run one micro army-vs-army matchup on a procedural map and return the
@@ -129,6 +120,53 @@ pub fn micro_matchup(
     g.units.clear();
     spawn_army(&mut g, Player::P0, a);
     spawn_army(&mut g, Player::P1, b);
+    // Issue both opening movement orders through the alternating-turn API,
+    // rather than applying a P1 command while P0 is still active. Each army
+    // gets one legal activation before the engagement loop begins.
+    let p0_units: Vec<u32> = g
+        .units
+        .iter()
+        .filter(|u| u.owner == Player::P0)
+        .map(|u| u.id)
+        .collect();
+    let p1_units: Vec<u32> = g
+        .units
+        .iter()
+        .filter(|u| u.owner == Player::P1)
+        .map(|u| u.id)
+        .collect();
+    let p1_hq = g
+        .hq(Player::P1)
+        .map(|b| b.tile)
+        .unwrap_or((MAP_SIZE as u8 / 2, MAP_SIZE as u8 / 2));
+    let _ = g.apply_commands(
+        Player::P0,
+        &[crucible_sim::Command::MoveGroup {
+            player: Player::P0,
+            units: p0_units,
+            waypoint: p1_hq,
+        }],
+    );
+    let _ = g.apply_commands(
+        Player::P0,
+        &[crucible_sim::Command::EndTurn { player: Player::P0 }],
+    );
+    let p0_hq = g
+        .hq(Player::P0)
+        .map(|b| b.tile)
+        .unwrap_or((MAP_SIZE as u8 / 2, MAP_SIZE as u8 / 2));
+    let _ = g.apply_commands(
+        Player::P1,
+        &[crucible_sim::Command::MoveGroup {
+            player: Player::P1,
+            units: p1_units,
+            waypoint: p0_hq,
+        }],
+    );
+    let _ = g.apply_commands(
+        Player::P1,
+        &[crucible_sim::Command::EndTurn { player: Player::P1 }],
+    );
     // Both armies march toward each other; once in range they fight. When a
     // unit has no target in its envelope it re-issues MoveGroup toward the
     // enemy HQ so the armies actually meet (units only move when ordered).
@@ -198,7 +236,9 @@ fn auto_engage_and_end(g: &mut Game) {
         let waypoint = g
             .hq(p.enemy())
             .map(|b| b.tile)
-            .map_or((32, 32), |t| adjacent_free_tile(g, t).unwrap_or(t));
+            .map_or((MAP_SIZE as u8 / 2, MAP_SIZE as u8 / 2), |t| {
+                adjacent_free_tile(g, t).unwrap_or(t)
+            });
         let _ = g.apply_commands(
             p,
             &[crucible_sim::Command::MoveGroup {
@@ -227,7 +267,7 @@ fn adjacent_free_tile(g: &Game, t: (u8, u8)) -> Option<(u8, u8)> {
     .iter()
     .filter_map(|&(dx, dy)| {
         let (x, y) = (t.0 as i32 + dx, t.1 as i32 + dy);
-        if x >= 0 && y >= 0 && x < 64 && y < 64 {
+        if x >= 0 && y >= 0 && x < MAP_SIZE as i32 && y < MAP_SIZE as i32 {
             Some((x as u8, y as u8))
         } else {
             None
@@ -344,12 +384,13 @@ pub fn counter_matrix(seeds: &[u64], config: &GameConfig) -> Vec<(&'static str, 
         &[(UnitType::Artillery, 4)],
         config,
     );
-    // 3 artillery (600) vs 12 infantry (600): siege fire breaks the swarm
-    // before it closes into the min-range dead zone.
+    // 4 artillery (800) vs 16 infantry (800): the larger formation gives
+    // siege enough overlapping fire lanes to break the swarm before it closes
+    // into the min-range dead zone, while still leaving mirrored upsets.
     let art_vs_inf = micro_matchup_rate(
         seeds,
-        &[(UnitType::Artillery, 3)],
-        &[(UnitType::Infantry, 12)],
+        &[(UnitType::Artillery, 4)],
+        &[(UnitType::Infantry, 16)],
         config,
     );
     vec![

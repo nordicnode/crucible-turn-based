@@ -1,7 +1,8 @@
 // Spectate screen: list stored replays, load one, and step through it
 // client-side via the wasm replay shim (full state, no fog). The wasm runs the
 // exact same sim as the server, so a replay is reproduced byte-for-byte.
-// Playback is frame-per-turn: one turn advances per second at 1× speed.
+// Playback is frame-per-activation: one activation advances per second at
+// 1× speed, while the HUD also shows the player-facing round.
 
 import { Renderer } from "./renderer";
 import { World } from "./world";
@@ -19,6 +20,7 @@ interface ReplaySummary {
   p2_type: string;
   result: string;
   duration_turns: number;
+  duration_rounds?: number;
   created_at: number;
 }
 
@@ -53,6 +55,7 @@ class Spectate {
   private pendingTurn: number | null = null;
   private ore0 = 0;
   private ore1 = 0;
+  private round = 1;
 
   get currentTurn(): number {
     return this.turn;
@@ -207,6 +210,7 @@ class Spectate {
       this.renderedTurn = f.turn;
       this.ore0 = f.ore0;
       this.ore1 = f.ore1;
+      this.round = f.round ?? Math.max(1, Math.floor((f.turn + 1) / 2));
       this.updateHud();
     } catch (e) {
       // A corrupt/legacy replay must degrade to a visible error, never crash
@@ -229,7 +233,12 @@ class Spectate {
   }
 
   private updateClock(): void {
-    el("sp-clock").textContent = `T${fmtTurns(this.turn)} / T${fmtTurns(this.duration)}`;
+    const currentRound = this.renderedTurn >= 0
+      ? this.round
+      : Math.max(1, Math.floor((this.turn + 1) / 2));
+    const durationRounds = this.meta?.duration_rounds
+      ?? Math.max(1, Math.floor((this.duration + 1) / 2));
+    el("sp-clock").textContent = `R${fmtTurns(currentRound)} / R${fmtTurns(durationRounds)} · T${fmtTurns(this.turn)} / T${fmtTurns(this.duration)}`;
   }
 
   private updateHud(): void {
@@ -254,8 +263,9 @@ class Spectate {
       const row = document.createElement("button");
       row.className = "btn spectate-row";
       const when = new Date(m.created_at * 1000).toLocaleString();
+      const rounds = m.duration_rounds ?? Math.max(1, Math.floor((m.duration_turns + 1) / 2));
       row.textContent =
-        `#${m.id} ${m.p1_type} vs ${m.p2_type} · ${fmtTurns(m.duration_turns)} turns · ${when}`;
+        `#${m.id} ${m.p1_type} vs ${m.p2_type} · ${fmtTurns(rounds)} rounds · ${fmtTurns(m.duration_turns)} activations · ${when}`;
       row.addEventListener("click", () => void this.loadReplay(m.id));
       body.appendChild(row);
     }

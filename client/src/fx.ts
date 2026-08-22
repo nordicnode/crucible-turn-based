@@ -69,6 +69,16 @@ export interface DeathEffect {
   maxLife: number;
 }
 
+export interface FloatingText {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  vy: number;
+  life: number;
+  maxLife: number;
+}
+
 export class FXEngine {
   tracks: TrackSegment[] = [];
   projectiles: Projectile[] = [];
@@ -76,6 +86,7 @@ export class FXEngine {
   explosions: Explosion[] = [];
   scorchMarks: ScorchMark[] = [];
   deaths: DeathEffect[] = [];
+  floatingTexts: FloatingText[] = [];
 
   private nextProjId = 1;
   private lastVehiclePos = new Map<number, { x: number; y: number; angle: number }>();
@@ -144,6 +155,14 @@ export class FXEngine {
       pt.y += pt.vy * dt;
       pt.life -= dt;
       if (pt.life <= 0) this.particles.splice(i, 1);
+    }
+
+    // 7. Update floating texts (damage numbers)
+    for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
+      const ft = this.floatingTexts[i];
+      ft.y += ft.vy * dt * 1000;
+      ft.life -= dt * 1000;
+      if (ft.life <= 0) this.floatingTexts.splice(i, 1);
     }
   }
 
@@ -251,6 +270,19 @@ export class FXEngine {
   }
 
   /** Spawn small impact spark burst */
+  /** Floating damage number (U7): rises and fades over ~1s. */
+  spawnFloatingText(x: number, y: number, text: string, color: string): void {
+    this.floatingTexts.push({
+      x,
+      y,
+      text,
+      color,
+      vy: -0.04,
+      life: 1000,
+      maxLife: 1000,
+    });
+  }
+
   spawnImpactSparks(x: number, y: number, color: string): void {
     for (let i = 0; i < 6; i++) {
       const a = Math.random() * Math.PI * 2;
@@ -536,6 +568,24 @@ export class FXEngine {
       ctx.fillRect(sx - pt.size / 2, sy - pt.size / 2, pt.size, pt.size);
       ctx.globalAlpha = 1;
     }
+
+    // 4. Floating damage texts (U7)
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const ft of this.floatingTexts) {
+      const sx = cam.screenX(ft.x);
+      const sy = cam.screenY(ft.y);
+      const a = ft.life / ft.maxLife;
+      ctx.globalAlpha = Math.max(0, Math.min(1, a));
+      ctx.font = `bold ${Math.max(10, Math.floor(z * 0.55))}px var(--sans) sans-serif`;
+      // Dark outline for readability against any terrain.
+      ctx.strokeStyle = "rgba(0,0,0,0.85)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(ft.text, sx, sy);
+      ctx.fillStyle = ft.color;
+      ctx.fillText(ft.text, sx, sy);
+    }
+    ctx.globalAlpha = 1;
   }
 }
 

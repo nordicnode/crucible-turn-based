@@ -3,6 +3,7 @@
 //! silently misapplied. Driven by the injected PRNG, so any failure is
 //! deterministic and reproducible. State invariants are checked every turn.
 
+use crucible_sim::map::MAP_SIZE;
 use crucible_sim::{
     building_stats, tech::TechId, unit_stats, BuildingType, Command, CommandError, Game,
     GameConfig, Map, Player, Rng, UnitType,
@@ -22,7 +23,10 @@ fn config() -> GameConfig {
 /// just its happy paths). Coordinates are always in-bounds; whether the tile
 /// is legal is the validator's job.
 fn random_command(rng: &mut Rng, g: &Game, p: Player) -> Command {
-    let tile = ((rng.below(64) as u8), (rng.below(64) as u8));
+    let tile = (
+        (rng.below(MAP_SIZE as u64) as u8),
+        (rng.below(MAP_SIZE as u64) as u8),
+    );
     let bt = match rng.below(12) {
         0 => BuildingType::Hq,
         1 => BuildingType::PowerPlant,
@@ -131,7 +135,10 @@ fn check_invariants(g: &Game) {
 
     // All entities are on the board.
     for u in &g.units {
-        assert!(u.tile.0 < 64 && u.tile.1 < 64, "unit off the map");
+        assert!(
+            u.tile.0 < MAP_SIZE as u8 && u.tile.1 < MAP_SIZE as u8,
+            "unit off the map"
+        );
         assert!(u.hp > 0, "dead unit still present");
         assert!(
             u.mp >= 0 && u.mp <= unit_stats(u.utype).mp,
@@ -139,7 +146,10 @@ fn check_invariants(g: &Game) {
         );
     }
     for b in &g.buildings {
-        assert!(b.tile.0 < 64 && b.tile.1 < 64, "building off the map");
+        assert!(
+            b.tile.0 < MAP_SIZE as u8 && b.tile.1 < MAP_SIZE as u8,
+            "building off the map"
+        );
         assert!(b.hp > 0, "dead building still present");
     }
 

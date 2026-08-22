@@ -17,11 +17,11 @@ pub mod scripted;
 
 pub use bot::Bot;
 pub use commander::GenomeBot;
-pub use decision::decide;
+pub use decision::{decide, LEARNED_BUILD_TYPES, LEARNED_TECH_TYPES, LEARNED_TRAIN_TYPES};
 pub use features::{extract, extract_single, FeatureInput, FEATURE_DIM};
 pub use headless::{
-    run_match, run_match_detailed, run_match_with_replay, series, DetailedOutcome, MatchOutcome,
-    SeriesReport,
+    drive_bot_turn, run_match, run_match_detailed, run_match_with_replay, series, DetailedOutcome,
+    MatchOutcome, SeriesReport,
 };
 pub use network::{forward, init, mutate, GENOME_LEN, OUTPUT};
 pub use scripted::{easy, hard, medium};

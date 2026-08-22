@@ -36,6 +36,8 @@ fn main() {
             let reason = match o.reason {
                 Some(WinReason::HqDestroyed) => "HQ",
                 Some(WinReason::Timeout) => "timeout",
+                Some(WinReason::ScienceVictory) => "science",
+                Some(WinReason::MapControl) => "control",
                 None => "?",
             };
             println!(

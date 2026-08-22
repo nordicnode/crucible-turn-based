@@ -143,6 +143,8 @@ pub struct TrainerShared {
     pub generation: AtomicU32,
     pub matches_run: AtomicU64,
     pub ghost_pool_size: AtomicU64,
+    /// Retained ghosts with a teaching priority above the routine baseline.
+    pub hard_example_count: AtomicU64,
     pub running: AtomicBool,
     pub last_event: Mutex<Option<serde_json::Value>>,
     /// Most recent champion-vs-hard-bot win rate (plan §5.8 floor check).
@@ -155,6 +157,7 @@ impl TrainerShared {
             "generation": self.generation.load(Ordering::Relaxed),
             "matches_run": self.matches_run.load(Ordering::Relaxed),
             "ghost_pool_size": self.ghost_pool_size.load(Ordering::Relaxed),
+            "hard_example_count": self.hard_example_count.load(Ordering::Relaxed),
             "running": self.running.load(Ordering::Relaxed),
             "last_event": self.last_event.lock().unwrap().clone(),
             "champion_hard_win_rate": *self.champion_floor.lock().unwrap(),
@@ -270,46 +273,83 @@ impl Trainer {
             }
         };
 
+        // Checkpoint shape is part of the persisted contract, not just an
+        // incidental vector length. A changed feature/action schema starts a
+        // clean population and cannot accidentally pair old champions with a
+        // new decision head.
+        let schema_compatible = store
+            .get_state("genome_schema_version")?
+            .and_then(|value| value.parse::<u32>().ok())
+            == Some(crucible_ai::network::GENOME_SCHEMA_VERSION);
+        if !schema_compatible {
+            tracing::info!(
+                "genome schema changed or is missing; starting a fresh population (schema {})",
+                crucible_ai::network::GENOME_SCHEMA_VERSION
+            );
+            store.reset_model_checkpoints()?;
+            store.set_state(
+                "genome_schema_version",
+                &crucible_ai::network::GENOME_SCHEMA_VERSION.to_string(),
+            )?;
+        }
+
         // Resume the latest checkpointed population, or initialize cold.
         // Genomes persisted under an older network shape (wrong length) are
         // discarded: they would panic the forward pass, and a stale population
         // is worse than a fresh one.
-        let (pop, ids) = match store.latest_generation()? {
-            Some(gen) => {
-                let rows = store.genomes_of_generation(gen)?;
-                let genomes: Vec<Vec<f32>> = rows.iter().map(|r| r.weights.clone()).collect();
-                let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
-                if !genomes.is_empty() && genomes.iter().all(|g| g.len() == crucible_ai::GENOME_LEN)
-                {
-                    (
-                        Population {
-                            genomes,
-                            generation: gen,
-                            sigma: sigma_at(&es, gen),
-                            params: es,
-                        },
-                        ids,
-                    )
-                } else {
-                    tracing::warn!(
-                        "checkpointed population (gen {gen}) has {} genomes with incompatible lengths; starting cold",
-                        genomes.len()
-                    );
-                    (
-                        Population::init(&mut Rng::from_seed(master_seed), es),
-                        Vec::new(),
-                    )
-                }
-            }
-            None => (
+        let (pop, ids) = if !schema_compatible {
+            (
                 Population::init(&mut Rng::from_seed(master_seed), es),
                 Vec::new(),
-            ),
+            )
+        } else {
+            match store.latest_generation()? {
+                Some(gen) => {
+                    let rows = store.genomes_of_generation(gen)?;
+                    let genomes: Vec<Vec<f32>> = rows.iter().map(|r| r.weights.clone()).collect();
+                    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+                    if !genomes.is_empty()
+                        && genomes.iter().all(|g| g.len() == crucible_ai::GENOME_LEN)
+                    {
+                        (
+                            Population {
+                                genomes,
+                                generation: gen,
+                                sigma: sigma_at(&es, gen),
+                                params: es,
+                            },
+                            ids,
+                        )
+                    } else {
+                        tracing::warn!(
+                            "checkpointed population (gen {gen}) has {} genomes with incompatible lengths; starting cold",
+                            genomes.len()
+                        );
+                        (
+                            Population::init(&mut Rng::from_seed(master_seed), es),
+                            Vec::new(),
+                        )
+                    }
+                }
+                None => (
+                    Population::init(&mut Rng::from_seed(master_seed), es),
+                    Vec::new(),
+                ),
+            }
         };
 
-        // Load the reigning champion and recent historical champions.
-        let champion = load_champion(&store)?;
-        let historical = load_historical(&store)?;
+        // Load the reigning champion and recent historical champions only when
+        // their schema is compatible with the current decision head.
+        let champion = if schema_compatible {
+            load_champion(&store)?
+        } else {
+            None
+        };
+        let historical = if schema_compatible {
+            load_historical(&store)?
+        } else {
+            Vec::new()
+        };
 
         // Bootstrap a cold start through the staged curriculum (plan §5.7) so
         // the self-play loop begins from a competent population + champion.
@@ -323,9 +363,13 @@ impl Trainer {
         // far we got so later refreshes only load matches played since.
         let mut ghost_pool = GhostPool::new(200);
         let ghost_last_id = load_ghost_pool_into(&store, &mut ghost_pool, 0, usize::MAX)?;
+        let _ = store.set_state("ghost_last_id", &ghost_last_id.to_string());
         shared
             .ghost_pool_size
             .store(ghost_pool.len() as u64, Ordering::Relaxed);
+        shared
+            .hard_example_count
+            .store(ghost_pool.priority_count(4) as u64, Ordering::Relaxed);
 
         Ok(Trainer {
             cfg,
@@ -563,9 +607,16 @@ impl Trainer {
                     self.shared
                         .ghost_pool_size
                         .store(self.ghost_pool.len() as u64, Ordering::Relaxed);
+                    self.shared
+                        .hard_example_count
+                        .store(self.ghost_pool.priority_count(4) as u64, Ordering::Relaxed);
+                    let _ = self
+                        .store
+                        .set_state("ghost_last_id", &self.ghost_last_id.to_string());
                     tracing::info!(
-                        "ghost pool refreshed: {} ghosts in pool",
-                        self.ghost_pool.len()
+                        "ghost pool refreshed: {} ghosts ({} hard examples)",
+                        self.ghost_pool.len(),
+                        self.ghost_pool.priority_count(4),
                     );
                 }
             }
@@ -574,7 +625,8 @@ impl Trainer {
     }
 
     /// Sample ghosts for a generation: champion-beaters always come first
-    /// (the post-upset focused cycle), then recency-weighted pool sampling.
+    /// (the post-upset focused cycle), then priority/recency-weighted ordinary
+    /// examples without duplicating the beater prefix.
     fn sample_ghosts(&self, rng: &mut Rng) -> Vec<Ghost> {
         if self.ghost_pool.is_empty() {
             return Vec::new();
@@ -582,7 +634,7 @@ impl Trainer {
         let want = self.cfg.ghosts_per_generation;
         let mut ghosts = self.ghost_pool.champion_beaters();
         if ghosts.len() < want {
-            ghosts.extend(self.ghost_pool.sample(rng, want - ghosts.len()));
+            ghosts.extend(self.ghost_pool.sample_non_beaters(rng, want - ghosts.len()));
         }
         ghosts.truncate(want);
         ghosts
@@ -718,8 +770,9 @@ impl Trainer {
     }
 }
 
-/// Rebuild the ghost pool from stored human matches (most recent weighted
-/// highest; any human win is flagged as a champion-beater for v1).
+/// Rebuild the ghost pool from stored, completed human matches. Priority is
+/// deterministic: difficult opponents, human victories/upsets, close margins,
+/// and short decisive games are weighted above routine examples.
 /// Add stored human matches with `id > since_id` to `pool` (pass 0 on the
 /// first call so the most recent 500 are loaded). Matches are added oldest
 /// first so the pool's recency counter rises with match id; the pool's own
@@ -752,11 +805,51 @@ fn load_ghost_pool_into(
         let Ok(replay) = Replay::from_json(&replay_json) else {
             continue;
         };
-        let ghost = Ghost::from_replay(&replay, Player::P0);
+        // Abandoned/partial rows are useful for diagnostics but are not stable
+        // teaching trajectories. Only completed, versioned replays enter the
+        // immutable ghost pool.
+        if m.result == "abandoned" || replay.result.is_none() {
+            continue;
+        }
         let beat_champion = m.result == "P0" && m.p2_type == "bot:champion";
-        pool.add(m.id as u64, ghost, beat_champion);
+        let priority = ghost_priority(&m, &replay, beat_champion);
+        let ghost = Ghost::from_replay(&replay, Player::P0);
+        pool.add_scored(m.id as u64, ghost, beat_champion, priority);
     }
     Ok(last_id)
+}
+
+/// Convert stored match metadata into a small integer priority. The formula is
+/// intentionally transparent and integer-only so sampling is reproducible and
+/// easy to inspect in a training report.
+fn ghost_priority(m: &crate::store::StoredMatch, replay: &Replay, beat_champion: bool) -> u32 {
+    let opponent = if m.p2_type == "bot:champion" {
+        5
+    } else if m.p2_type == "bot:hard" {
+        4
+    } else if m.p2_type == "bot:medium" {
+        3
+    } else {
+        1
+    };
+    let outcome = match m.result.as_str() {
+        "P0" => 4,
+        "P1" => 3,
+        _ => 1,
+    };
+    let final_game = crucible_sim::serialize::replay_to_game(replay);
+    let p0 = final_game.remaining_value(Player::P0).unsigned_abs();
+    let p1 = final_game.remaining_value(Player::P1).unsigned_abs();
+    let total = p0.saturating_add(p1).max(1);
+    let margin = p0.abs_diff(p1);
+    let close = if margin.saturating_mul(4) <= total {
+        3
+    } else {
+        0
+    };
+    let decisive = if m.duration_turns <= 12 { 1 } else { 0 };
+    let upset = if beat_champion { 6 } else { 0 };
+    (opponent + outcome + close + decisive + upset).max(1)
 }
 
 /// Run the staged bootstrap curriculum on a cold start and checkpoint the

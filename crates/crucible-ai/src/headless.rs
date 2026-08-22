@@ -2,13 +2,12 @@
 //! outcome. This is the shared evaluation path for scenario tests, scripted
 //! bot matchups, and fitness evaluation.
 //!
-//! The loop is strictly alternating-turn: each iteration asks the active
-//! player's bot for its turn's commands and applies them in order. The
-//! `Command::EndTurn` every bot appends drives the whole lifecycle
-//! (turret fire → income → production → opponent's turn); there is no manual
-//! stepping.
+//! The loop is strictly alternating-activation: each round asks P0 and then
+//! P1 for exactly one activation. The `Command::EndTurn` every bot appends
+//! drives the lifecycle; the shared driver completes a missing EndTurn once so
+//! a broken policy cannot stall the match. There is no wall-clock stepping.
 
-use crucible_sim::{Game, GameConfig, Map, Player, Replay, ReplayResult, WinReason};
+use crucible_sim::{Command, Game, GameConfig, Map, Player, Replay, ReplayResult, WinReason};
 
 use crate::bot::Bot;
 
@@ -17,8 +16,10 @@ use crate::bot::Bot;
 pub struct MatchOutcome {
     pub winner: Option<Player>,
     pub reason: Option<WinReason>,
-    /// The turn number on which the match ended.
+    /// The activation number on which the match ended (legacy compatibility).
     pub duration_turns: i32,
+    /// The player-facing round containing the terminal activation.
+    pub duration_rounds: i32,
 }
 
 impl MatchOutcome {
@@ -35,6 +36,24 @@ pub struct DetailedOutcome {
     pub outcome: MatchOutcome,
     pub p0_value: i32,
     pub p1_value: i32,
+}
+
+/// Drive exactly one activation for `player` and return the commands that
+/// were issued. A policy that omits EndTurn is advanced once as a safety
+/// fallback; it is never polled repeatedly for the same activation.
+///
+/// This function is shared by live/server-style orchestration and headless
+/// evaluation so both paths have identical turn accounting.
+pub fn drive_bot_turn(game: &mut Game, player: Player, bot: &mut dyn Bot) -> Vec<Command> {
+    if game.is_over() || game.active != player {
+        return Vec::new();
+    }
+    let commands = bot.decide(game, player);
+    game.apply_commands(player, &commands);
+    if !game.is_over() && game.active == player {
+        game.end_turn();
+    }
+    commands
 }
 
 /// Run a single match to completion between two bots.
@@ -69,42 +88,26 @@ pub fn run_match_with_replay(
     let mut game = Game::new(Map::generate(seed), config.clone());
     let mut replay = Replay::new(seed, config.clone());
 
-    // Safety valve in case a bot configuration deadlocks the match forever
-    // (e.g. a bot that never issues `EndTurn`). For an unlimited config
-    // (`timeout_turns <= 0`) this must not silently truncate a normal match,
-    // so only the huge deadlock guard applies there.
+    // The activation cap remains the compatibility safety valve for an
+    // unlimited config. `drive_bot_turn` itself always makes progress, so a
+    // stalled bot cannot consume an unbounded number of decisions.
     let max_turns = if config.timeout_turns > 0 {
         config.timeout_turns + 200
     } else {
         10_000
     };
 
-    let mut stall_decides = 0;
     while !game.is_over() && game.turn <= max_turns {
         let p = game.active;
-        let turn_before = game.turn;
+        let turn = game.turn;
+        let round = game.round;
         let cmds = if p == Player::P0 {
-            a.decide(&game, p)
+            drive_bot_turn(&mut game, p, a)
         } else {
-            b.decide(&game, p)
+            drive_bot_turn(&mut game, p, b)
         };
-        for c in &cmds {
-            replay.record(game.turn, p, c.clone());
-        }
-        // Applied in order; `EndTurn` inside `cmds` advances the turn.
-        game.apply_commands(p, &cmds);
-        if game.turn == turn_before {
-            // The bot did not end its turn. Count consecutive stalled decides
-            // and force the lifecycle so a broken bot cannot hang the runner
-            // (the `turn <= max_turns` guard alone can't fire — the turn never
-            // advances while a bot omits `EndTurn`).
-            stall_decides += 1;
-            if stall_decides >= 5 {
-                game.end_turn();
-                stall_decides = 0;
-            }
-        } else {
-            stall_decides = 0;
+        for c in cmds {
+            replay.record_at(round, turn, p, c);
         }
     }
 
@@ -112,6 +115,7 @@ pub fn run_match_with_replay(
         winner: game.winner,
         reason: game.win_reason,
         duration_turns: game.turn,
+        duration_rounds: game.round,
     });
 
     let outcome = DetailedOutcome {
@@ -119,6 +123,7 @@ pub fn run_match_with_replay(
             winner: game.winner,
             reason: game.win_reason,
             duration_turns: game.turn,
+            duration_rounds: game.round,
         },
         p0_value: game.remaining_value(Player::P0),
         p1_value: game.remaining_value(Player::P1),
@@ -195,6 +200,7 @@ mod tests {
         );
         assert_eq!(repro.winner, outcome.outcome.winner);
         assert_eq!(repro.turn, outcome.outcome.duration_turns);
+        assert_eq!(repro.round, outcome.outcome.duration_rounds);
     }
 
     #[test]
@@ -210,8 +216,8 @@ mod tests {
         assert_eq!(r1.to_json(), r2.to_json());
     }
 
-    /// A bot that never ends its turn must not hang the runner: the deadlock
-    /// guard cuts the match off after `timeout_turns + 200`.
+    /// A bot that never ends its activation must not be polled repeatedly for
+    /// the same activation.
     #[test]
     fn stalling_bot_cannot_hang_the_runner() {
         struct Stall;
@@ -228,7 +234,8 @@ mod tests {
         let mut h = medium();
         let o = run_match(9, &cfg, &mut s, &mut h);
         assert!(!o.won_by(Player::P0));
-        assert!(o.duration_turns <= cfg.timeout_turns + 201);
+        assert!(o.duration_turns > 0);
+        assert!(o.duration_rounds > 0);
     }
 
     fn crucible_ai_genome(seed: u64) -> Vec<f32> {

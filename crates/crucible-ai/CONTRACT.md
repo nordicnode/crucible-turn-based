@@ -18,7 +18,7 @@ scheduling, storage, and match execution are injected by `crucible-server`
   20 sim ticks = 2 s), never unit micro.
 - Between command ticks the world runs on the sim's scripted unit rules. The
   AI may only issue group orders (`MoveGroup`, `TrainUnit`, `PlaceBuilding`,
-  `ChooseUpgrade`, `Sell`), exactly the human action space.
+  `StartResearch`, `Sell`), exactly the human action space.
 - No unit-level learned micro, no neural pathfinding, no per-unit networks.
 
 ## 3. Fairness by construction

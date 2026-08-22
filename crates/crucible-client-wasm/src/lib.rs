@@ -77,7 +77,7 @@ fn replay_to_turn(replay: &Replay, turn: i32) -> crucible_sim::Game {
 }
 
 /// Static replay metadata for the spectate screen: the map (passability, HQ
-/// spawns, initial ore layout) plus the recorded outcome. Called once per
+/// spawns, initial generic resource layout) plus the recorded outcome. Called once per
 /// replay; the per-frame payload in [`replay_frame`] stays lean.
 #[wasm_bindgen]
 pub fn replay_meta(replay_json: &str) -> Result<String, JsValue> {
@@ -88,22 +88,52 @@ pub fn replay_meta(replay_json: &str) -> Result<String, JsValue> {
         .as_ref()
         .map(|r| r.duration_turns)
         .unwrap_or(replay.config.timeout_turns);
+    let duration_rounds = replay
+        .result
+        .as_ref()
+        .map(|r| {
+            if r.duration_rounds > 0 {
+                r.duration_rounds
+            } else {
+                (r.duration_turns + 1).div_euclid(2).max(1)
+            }
+        })
+        .unwrap_or((duration + 1).div_euclid(2).max(1));
     Ok(serde_json::json!({
         "map_seed": replay.map_seed,
         "passable": map.passable,
         "terrain": map.terrain,
+        "elevation": map.elevation,
+        "moisture": map.moisture,
+        "temperature": map.temperature,
+        "terrain_rules": crucible_sim::map::Terrain::ALL
+            .into_iter()
+            .map(|terrain| serde_json::json!({
+                "kind": format!("{terrain:?}"),
+                "label": terrain.label(),
+                "passable": terrain.is_passable(),
+                "move_multiplier": terrain.move_mult(),
+                "defense_reduction": terrain.defense_reduction(),
+                "tactical_tag": terrain.tactical_tag(),
+            }))
+            .collect::<Vec<_>>(),
         "hq_tiles": map.hq_tiles,
         "ore": map.ore,
+        "steel": map.steel,
+        "coal": map.coal,
         "crystal": map.crystal,
+        "resource_kind": map.resource_kind,
+        "richness": map.richness,
         "duration_turns": duration,
+        "duration_rounds": duration_rounds,
         "winner": replay.result.as_ref().and_then(|r| r.winner.map(|p| p.index() as u8)),
         "win_reason": replay.result.as_ref().and_then(|r| r.reason),
     })
     .to_string())
 }
 
-/// One lean spectate frame: both players' entities (full state, no fog) and
-/// scores at a given turn. `kind` strings use the serde variant names
+/// One lean spectate frame: both players' entities (full state, no fog),
+/// resource wallets, and scores at a given turn. `kind` strings use the serde variant names
 /// (`"Infantry"`, `"Hq"`, …) to match the live match protocol.
 #[wasm_bindgen]
 pub fn replay_frame(replay_json: &str, turn: i32) -> Result<String, JsValue> {
@@ -121,6 +151,12 @@ pub fn replay_frame(replay_json: &str, turn: i32) -> Result<String, JsValue> {
                 "y": u.tile.1 as f32 + 0.5,
                 "hp": u.hp,
                 "max_hp": u.max_hp,
+                "mp": u.mp,
+                "max_mp": crucible_sim::unit_stats(u.utype).mp,
+                "move_target": u.move_target,
+                "movement_path": game.movement_path(u.id),
+                "moved": u.moved,
+                "acted": u.acted,
             })
         })
         .collect();
@@ -136,6 +172,11 @@ pub fn replay_frame(replay_json: &str, turn: i32) -> Result<String, JsValue> {
                 "y": b.tile.1 as f32 + 0.5,
                 "hp": b.hp,
                 "max_hp": b.max_hp,
+                "queue": b.queue,
+                "progress": if b.queue.is_empty() { serde_json::Value::Null } else { serde_json::json!(b.progress) },
+                "build_time": b.queue.first().map(|u| crucible_sim::unit_stats(*u).build_time_turns),
+                "construction_progress": b.construction_progress,
+                "construction_time": b.construction_time(),
             })
         })
         .collect();
@@ -143,9 +184,20 @@ pub fn replay_frame(replay_json: &str, turn: i32) -> Result<String, JsValue> {
     let (p1_prod, p1_cons) = game.power(crucible_sim::Player::P1);
     Ok(serde_json::json!({
         "turn": game.turn,
+        "round": game.round,
         "active": game.active.index() as u8,
         "ore0": game.ore[0],
         "ore1": game.ore[1],
+        "steel0": game.steel[0],
+        "steel1": game.steel[1],
+        "coal0": game.coal[0],
+        "coal1": game.coal[1],
+        "crystal0": game.crystal[0],
+        "crystal1": game.crystal[1],
+        "resources0": game.resources(crucible_sim::Player::P0),
+        "resources1": game.resources(crucible_sim::Player::P1),
+        "income0": game.resource_income(crucible_sim::Player::P0),
+        "income1": game.resource_income(crucible_sim::Player::P1),
         "power0": [p0_prod, p0_cons],
         "power1": [p1_prod, p1_cons],
         "units": units,
@@ -167,6 +219,7 @@ pub fn replay_result(replay_json: &str) -> Result<String, JsValue> {
     Ok(serde_json::json!({
         "reason": game.win_reason,
         "duration_turns": game.turn,
+        "duration_rounds": game.round,
         "hash": hash,
     })
     .to_string())
@@ -209,6 +262,10 @@ mod tests {
             fnv1a_native(&serialize::snapshot_bytes(&game))
         );
         assert_eq!(result["duration_turns"].as_i64().unwrap() as i32, game.turn);
+        assert_eq!(
+            result["duration_rounds"].as_i64().unwrap() as i32,
+            game.round
+        );
     }
 
     #[test]
@@ -241,24 +298,19 @@ mod tests {
             ..GameConfig::default()
         };
         let mut replay = Replay::new(seed, cfg.clone());
-        // Refineries must sit on ore: find a free ore-adjacent tile.
+        // A generic refinery claims the nearest live deposit tile itself.
         let map = crucible_sim::Map::generate(seed);
         let hq = map.hq_tiles[0];
-        let ore_tile = (0..crucible_sim::map::MAP_TILES)
+        let place = (0..crucible_sim::map::MAP_TILES)
             .map(crucible_sim::map::tile_coords)
-            .filter(|&t| map.ore_at(t.0, t.1) > 0)
-            .min_by_key(|&t| (t.0 as i32 - hq.0 as i32).abs() + (t.1 as i32 - hq.1 as i32).abs())
-            .expect("map has ore");
-        let place = [
-            (ore_tile.0 as i32 + 1, ore_tile.1 as i32),
-            (ore_tile.0 as i32 - 1, ore_tile.1 as i32),
-            (ore_tile.0 as i32, ore_tile.1 as i32 + 1),
-            (ore_tile.0 as i32, ore_tile.1 as i32 - 1),
-        ]
-        .into_iter()
-        .map(|(x, y)| (x as u8, y as u8))
-        .find(|&t| map.is_passable(t.0, t.1) && t != hq)
-        .expect("free ore-adjacent tile");
+            .filter(|&t| map.resource_amount_at(t.0, t.1) > 0)
+            .min_by_key(|&t| {
+                (
+                    (t.0 as i32 - hq.0 as i32).abs() + (t.1 as i32 - hq.1 as i32).abs(),
+                    crucible_sim::map::tile_index(t.0, t.1),
+                )
+            })
+            .expect("map has a resource tile");
         replay.record(
             1,
             Player::P0,
@@ -274,7 +326,10 @@ mod tests {
 
         let meta: serde_json::Value = serde_json::from_str(&replay_meta(&rj).unwrap()).unwrap();
         assert_eq!(meta["map_seed"].as_u64().unwrap(), seed);
-        assert_eq!(meta["passable"].as_array().unwrap().len(), 64 * 64);
+        assert_eq!(
+            meta["passable"].as_array().unwrap().len(),
+            crucible_sim::map::MAP_TILES
+        );
 
         let snap: serde_json::Value =
             serde_json::from_str(&replay_snapshot_json(&rj, 5).unwrap()).unwrap();
@@ -283,6 +338,7 @@ mod tests {
         // Seeking to turn 5 runs the lifecycle through turn 5, then one more
         // end_turn hands off (turn 6) before the loop's `<= turn` check exits.
         assert_eq!(frame["turn"].as_i64().unwrap(), 6);
+        assert_eq!(frame["round"].as_i64().unwrap(), 3);
         assert_eq!(
             snap["units"].as_array().unwrap().len(),
             frame["units"].as_array().unwrap().len()

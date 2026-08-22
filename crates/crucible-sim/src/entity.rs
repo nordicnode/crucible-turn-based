@@ -34,11 +34,122 @@ impl Player {
     pub const ALL: [Player; 2] = [Player::P0, Player::P1];
 }
 
+/// Resource types that may appear as inexhaustible map deposits or in a
+/// stockpile. A deposit's richness, not a remaining reserve, controls yield.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
+pub enum ResourceType {
+    Ore,
+    Steel,
+    Coal,
+    Crystal,
+}
+
+impl ResourceType {
+    pub const ALL: [ResourceType; 4] = [
+        ResourceType::Ore,
+        ResourceType::Steel,
+        ResourceType::Coal,
+        ResourceType::Crystal,
+    ];
+
+    pub const fn index(self) -> usize {
+        match self {
+            ResourceType::Ore => 0,
+            ResourceType::Steel => 1,
+            ResourceType::Coal => 2,
+            ResourceType::Crystal => 3,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ResourceType::Ore => "Ore",
+            ResourceType::Steel => "Steel",
+            ResourceType::Coal => "Coal",
+            ResourceType::Crystal => "Crystal",
+        }
+    }
+}
+
+/// A player's stockpile or a blueprint's resource price.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub struct ResourceBundle {
+    pub ore: i32,
+    pub steel: i32,
+    pub coal: i32,
+    pub crystal: i32,
+}
+
+impl ResourceBundle {
+    pub const fn new(ore: i32, steel: i32, coal: i32, crystal: i32) -> Self {
+        ResourceBundle {
+            ore,
+            steel,
+            coal,
+            crystal,
+        }
+    }
+
+    pub const fn zero() -> Self {
+        ResourceBundle::new(0, 0, 0, 0)
+    }
+
+    pub fn can_afford(self, price: ResourceBundle) -> bool {
+        self.ore >= price.ore
+            && self.steel >= price.steel
+            && self.coal >= price.coal
+            && self.crystal >= price.crystal
+    }
+
+    pub fn checked_sub(self, price: ResourceBundle) -> Option<ResourceBundle> {
+        if self.can_afford(price) {
+            Some(ResourceBundle::new(
+                self.ore - price.ore,
+                self.steel - price.steel,
+                self.coal - price.coal,
+                self.crystal - price.crystal,
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub fn saturating_add(self, amount: ResourceBundle) -> ResourceBundle {
+        ResourceBundle::new(
+            self.ore.saturating_add(amount.ore),
+            self.steel.saturating_add(amount.steel),
+            self.coal.saturating_add(amount.coal),
+            self.crystal.saturating_add(amount.crystal),
+        )
+    }
+
+    pub fn scaled_floor(self, numerator: i32, denominator: i32) -> ResourceBundle {
+        if denominator <= 0 {
+            return ResourceBundle::zero();
+        }
+        ResourceBundle::new(
+            self.ore * numerator / denominator,
+            self.steel * numerator / denominator,
+            self.coal * numerator / denominator,
+            self.crystal * numerator / denominator,
+        )
+    }
+
+    /// A stable value used for timeout/fitness scoring.
+    pub fn total_value(self) -> i32 {
+        self.ore + self.steel + self.coal + self.crystal
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 pub enum BuildingType {
     Hq,
     PowerPlant,
+    /// The generic extractor. It is placed directly on any live deposit and
+    /// produces that tile's resource type.
     Refinery,
+    /// Legacy wire/replay name retained for old matches. It follows the same
+    /// generic on-tile extraction rules as `Refinery`.
     CrystalRefinery,
     Barracks,
     Factory,
@@ -48,6 +159,13 @@ pub enum BuildingType {
     TeslaCoil,
     Turret,
     AATurret,
+}
+
+impl BuildingType {
+    /// Whether this structure extracts the resource on its own tile.
+    pub const fn is_refinery(self) -> bool {
+        matches!(self, BuildingType::Refinery | BuildingType::CrystalRefinery)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Debug)]
@@ -70,7 +188,10 @@ pub type EntityId = u32;
 /// durations in turns, ore in integer units.
 #[derive(Clone, Copy, Debug)]
 pub struct UnitStats {
+    /// Legacy ore-equivalent value used by balance/timeout scoring.
     pub cost: i32,
+    /// Actual spendable price across all stockpiles.
+    pub resource_cost: ResourceBundle,
     pub hp: i32,
     pub damage: i32,
     /// Attack range in tiles (Chebyshev-free Euclidean on tile centers).
@@ -93,7 +214,10 @@ pub struct UnitStats {
 
 #[derive(Clone, Copy, Debug)]
 pub struct BuildingStats {
+    /// Legacy ore-equivalent value used by balance/timeout scoring.
     pub cost: i32,
+    /// Actual spendable price across all stockpiles.
+    pub resource_cost: ResourceBundle,
     pub hp: i32,
     pub vision_tiles: i32,
     /// Attack damage (turrets only; fired once per own turn at end of turn).
@@ -102,6 +226,8 @@ pub struct BuildingStats {
     pub range_tiles: i32,
     /// Power produced (positive) or consumed (negative).
     pub power: i32,
+    /// Construction duration in turns.
+    pub build_time_turns: i32,
 }
 
 pub const fn unit_stats(ut: UnitType) -> UnitStats {
@@ -109,6 +235,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
     match ut {
         Infantry => UnitStats {
             cost: 50,
+            resource_cost: ResourceBundle::new(50, 10, 0, 0),
             hp: 90,
             damage: 55,
             range_tiles: 1,
@@ -122,6 +249,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         // Fast, fragile recon: a long stride and wide eyes, poor in a fight.
         Scout => UnitStats {
             cost: 40,
+            resource_cost: ResourceBundle::new(40, 8, 0, 0),
             hp: 60,
             damage: 30,
             range_tiles: 1,
@@ -136,6 +264,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         // Rockets trade the rifleman's cheapness for a hard punch vs vehicles.
         RocketTrooper => UnitStats {
             cost: 120,
+            resource_cost: ResourceBundle::new(120, 35, 0, 0),
             hp: 90,
             damage: 85,
             range_tiles: 2,
@@ -148,6 +277,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         },
         Tank => UnitStats {
             cost: 150,
+            resource_cost: ResourceBundle::new(150, 60, 20, 0),
             hp: 260,
             damage: 105,
             range_tiles: 1,
@@ -162,6 +292,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         // slow — but outranges every turret and hits from behind the line.
         Artillery => UnitStats {
             cost: 200,
+            resource_cost: ResourceBundle::new(200, 80, 30, 0),
             hp: 120,
             damage: 110,
             range_tiles: 3,
@@ -174,6 +305,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         },
         MammothTank => UnitStats {
             cost: 350,
+            resource_cost: ResourceBundle::new(350, 180, 60, 0),
             hp: 550,
             damage: 170,
             range_tiles: 1,
@@ -188,6 +320,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         // everything, strikes from range 2 where melee units cannot retaliate.
         Gunship => UnitStats {
             cost: 250,
+            resource_cost: ResourceBundle::new(250, 100, 80, 0),
             hp: 140,
             damage: 105,
             range_tiles: 2,
@@ -200,6 +333,7 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         },
         Interceptor => UnitStats {
             cost: 200,
+            resource_cost: ResourceBundle::new(200, 80, 100, 0),
             hp: 110,
             damage: 70,
             range_tiles: 2,
@@ -213,10 +347,18 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
         // Ground-based surface-to-air missile launcher: brutal vs aircraft,
         // fragile and short-ranged against ground targets (low damage, small
         // hp, slow). The dedicated answer to a gunship/interceptor fleet.
+        // Ground-based surface-to-air missile launcher: brutal vs aircraft,
+        // weak against ground targets (low damage, fragile, slow). The
+        // dedicated answer to a gunship/interceptor fleet. Its ground damage
+        // is deliberately low so it cannot double as a general-purpose unit.
         SamLauncher => UnitStats {
             cost: 180,
+            resource_cost: ResourceBundle::new(180, 100, 50, 0),
             hp: 110,
-            damage: 75,
+            // Low base damage: the SAM is an AA specialist, not a brawler.
+            // The anti-air rule in combat gives full damage to air targets;
+            // ground targets take half of this already-low value.
+            damage: 35,
             range_tiles: 4,
             min_range_tiles: 1,
             mp: 2,
@@ -233,118 +375,145 @@ pub const fn building_stats(bt: BuildingType) -> BuildingStats {
     match bt {
         Hq => BuildingStats {
             cost: 0,
+            resource_cost: ResourceBundle::zero(),
             hp: 1500,
-            vision_tiles: 5,
+            // A slightly generous opening sightline reveals the first biome
+            // ring while fog still protects the wider theatre.
+            vision_tiles: 7,
             damage: 0,
             range_tiles: 0,
             power: 50,
+            build_time_turns: 0,
         },
         PowerPlant => BuildingStats {
             cost: 150,
+            resource_cost: ResourceBundle::new(150, 20, 50, 0),
             hp: 300,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: 100,
+            build_time_turns: 1,
         },
         Refinery => BuildingStats {
             cost: 300,
+            resource_cost: ResourceBundle::new(300, 50, 0, 0),
             hp: 400,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: -20,
+            build_time_turns: 2,
         },
-        // Drains adjacent crystal fields, like a Refinery drains ore. Placed
-        // adjacent to a crystal tile (see `Game::validate_place`).
+        // Compatibility alias for old replays. New commands should use the
+        // generic Refinery on whichever resource tile they want to claim.
         CrystalRefinery => BuildingStats {
             cost: 350,
+            resource_cost: ResourceBundle::new(350, 50, 0, 0),
             hp: 400,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: -25,
+            build_time_turns: 2,
         },
         Barracks => BuildingStats {
             cost: 150,
+            resource_cost: ResourceBundle::new(150, 40, 0, 0),
             hp: 300,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: -15,
+            build_time_turns: 2,
         },
         Factory => BuildingStats {
             cost: 250,
+            resource_cost: ResourceBundle::new(250, 100, 30, 0),
             hp: 400,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: -25,
+            build_time_turns: 2,
         },
         TechLab => BuildingStats {
             cost: 200,
+            resource_cost: ResourceBundle::new(200, 80, 50, 0),
             hp: 250,
             vision_tiles: 3,
             damage: 0,
             range_tiles: 0,
             power: -30,
+            build_time_turns: 3,
         },
         Airfield => BuildingStats {
             cost: 250,
+            resource_cost: ResourceBundle::new(250, 80, 100, 0),
             hp: 350,
             vision_tiles: 4,
             damage: 0,
             range_tiles: 0,
             power: -25,
+            build_time_turns: 2,
         },
         // Long-range early-warning dish: reveals a huge swath of the map so
         // scouting happens passively. The tech payoff for map awareness.
         Radar => BuildingStats {
             cost: 150,
+            resource_cost: ResourceBundle::new(150, 40, 30, 0),
             hp: 300,
             vision_tiles: 10,
             damage: 0,
             range_tiles: 0,
             power: -10,
+            build_time_turns: 2,
         },
         // High-voltage coil defense: a turret that outranges and out-hits the
         // standard turret (range 4, 24 dmg), gated on the TechLab.
         TeslaCoil => BuildingStats {
             cost: 250,
+            resource_cost: ResourceBundle::new(250, 100, 100, 0),
             hp: 260,
             vision_tiles: 4,
             damage: 24,
             range_tiles: 4,
             power: -30,
+            build_time_turns: 2,
         },
         Turret => BuildingStats {
             cost: 100,
+            resource_cost: ResourceBundle::new(100, 30, 10, 0),
             hp: 150,
             vision_tiles: 4,
             damage: 12,
             range_tiles: 3,
             power: -20,
+            build_time_turns: 1,
         },
         // Anti-air defense: only engages air units, but hits them hard.
         AATurret => BuildingStats {
             cost: 200,
+            resource_cost: ResourceBundle::new(200, 80, 50, 0),
             hp: 200,
             vision_tiles: 5,
             damage: 45,
             range_tiles: 4,
             power: -25,
+            build_time_turns: 2,
         },
     }
 }
 
-/// Passive income: each player's HQ generates this much ore per turn.
+/// Passive income: each player's HQ generates this much Ore per turn.
 pub const HQ_INCOME_PER_TURN: i32 = 10;
-/// Passive income: each refinery drains up to this much ore per turn from
-/// adjacent ore tiles (lowest tile-index first). A refinery whose adjacent
-/// fields are depleted earns nothing.
+/// Base extraction for a standard-richness, inexhaustible resource tile.
+/// Richness tiers multiply this by 1/2/3; Crystal uses a slower base rate.
+pub const REFINERY_BASE_YIELD_PER_TURN: i32 = 30;
+pub const CRYSTAL_REFINERY_BASE_YIELD_PER_TURN: i32 = 15;
+/// Legacy rate aliases retained for callers compiled against the old economy;
+/// they are rates, never finite deposit capacities.
 pub const REFINERY_ORE_PER_TURN: i32 = 60;
-/// Each crystal refinery drains up to this much crystal per turn from
-/// adjacent crystal tiles.
 pub const CRYSTAL_REFINERY_PER_TURN: i32 = 25;
 /// Each Tech Lab generates this many research points per own turn. Paced so
 /// a tier-1 tech (150 pts) lands in ~6 turns — close to the old instant
@@ -374,9 +543,9 @@ pub fn unit_requires_tech(ut: UnitType) -> Option<crate::tech::TechId> {
 
 /// Where a building may be placed: within this many tiles (center-to-center)
 /// of at least one own building, so bases grow in connected clumps instead of
-/// floating structures. Refineries are exempt (they must instead be placed
-/// adjacent to an ore tile — see `Game::validate_place`), which makes remote
-/// ore pockets the expansion mechanic.
+/// floating structures. Resource refineries are exempt: they must instead be
+/// placed directly on a live deposit, which makes remote resource pockets the
+/// expansion mechanic.
 pub const PLACE_RADIUS_TILES: i32 = 5;
 
 /// Fog memory: remembered enemy sightings drop after this many turns unseen.
@@ -389,6 +558,12 @@ pub const REPAIR_HP_DEN: i32 = 100;
 pub const REPAIR_COST_NUM: i32 = 20;
 pub const REPAIR_COST_DEN: i32 = 100;
 pub const REPAIR_MIN_COST: i32 = 10;
+
+fn legacy_complete_progress() -> i32 {
+    // Snapshots from before construction sites existed contain no progress
+    // field. Treat those historical buildings as already completed.
+    i32::MAX
+}
 
 /// A building in the world.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -403,6 +578,10 @@ pub struct Building {
     pub queue: Vec<UnitType>,
     /// Progress toward the current queue head, in turns.
     pub progress: i32,
+    /// Progress of this building's own construction, in turns. A placed site
+    /// starts at zero and advances only on its owner's start-of-turn.
+    #[serde(default = "legacy_complete_progress")]
+    pub construction_progress: i32,
     /// Attack cooldown (turrets fire once per own turn; unused otherwise).
     pub cooldown: i32,
     /// Whether this building was repaired already this turn.
@@ -413,6 +592,14 @@ pub struct Building {
 impl Building {
     pub fn is_alive(&self) -> bool {
         self.hp > 0
+    }
+
+    pub fn construction_time(&self) -> i32 {
+        building_stats(self.btype).build_time_turns
+    }
+
+    pub fn is_operational(&self) -> bool {
+        self.is_alive() && self.construction_progress >= self.construction_time()
     }
 }
 
@@ -427,6 +614,11 @@ pub struct Unit {
     pub max_hp: i32,
     /// Movement points remaining this turn.
     pub mp: i32,
+    /// Durable destination. The sim automatically advances toward it at the
+    /// start of this unit's next turn until it is reached or the order is
+    /// replaced/cleared.
+    #[serde(default)]
+    pub move_target: Option<(u8, u8)>,
     /// Has moved this turn (a unit may move then attack, not attack then move).
     pub moved: bool,
     /// Has attacked this turn (ends the unit's activation).

@@ -277,6 +277,7 @@ pub async fn autobattle(
             "winner": outcome.outcome.winner.map(|p| p.index() as u8),
             "reason": outcome.outcome.reason,
             "duration_turns": outcome.outcome.duration_turns,
+            "duration_rounds": outcome.outcome.duration_rounds,
             "replay_id": replay_id,
             "replay": serde_json::from_str::<Value>(&replay_json).unwrap_or(Value::Null),
         }))

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS matches (
@@ -93,6 +93,27 @@ DELETE FROM training_stats;
 DELETE FROM trainer_state;
 DELETE FROM events;
 ";
+
+/// Live-match save slots (F2 save/resume). One row per abandoned match;
+/// resuming deletes the row so a save is consumed exactly once.
+const MIGRATION_V6: &str = "
+CREATE TABLE IF NOT EXISTS saves (
+    key TEXT PRIMARY KEY,
+    opponent TEXT NOT NULL,
+    game_json TEXT NOT NULL,
+    replay_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+";
+
+/// A stored live-match save: opponent label plus the serialized game.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct StoredSave {
+    pub key: String,
+    pub opponent: String,
+    pub game_json: String,
+    pub replay_json: String,
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StoredMatch {
@@ -232,6 +253,54 @@ impl Store {
             row.get(0)
         })
         .optional()
+    }
+
+    // --- Save / resume -----------------------------------------------------
+
+    /// Store a live match snapshot under `key` (F2). Overwrites any previous
+    /// snapshot with the same key.
+    pub fn save_game(
+        &self,
+        key: &str,
+        opponent: &str,
+        game_json: &str,
+        replay_json: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO saves (key, opponent, game_json, replay_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(key) DO UPDATE SET opponent = excluded.opponent,
+                                             game_json = excluded.game_json,
+                                             replay_json = excluded.replay_json,
+                                             created_at = excluded.created_at",
+            rusqlite::params![key, opponent, game_json, replay_json, unix_now()],
+        )?;
+        Ok(())
+    }
+
+    /// The most recently saved live match, if any (F2 resume entry point).
+    pub fn latest_save(&self) -> Result<Option<StoredSave>, rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT key, opponent, game_json, replay_json FROM saves ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(StoredSave {
+                key: row.get(0)?,
+                opponent: row.get(1)?,
+                game_json: row.get(2)?,
+                replay_json: row.get(3)?,
+            })
+        })?;
+        rows.next().transpose()
+    }
+
+    /// Remove a consumed save (resumed matches are single-use).
+    pub fn delete_save(&self, key: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("DELETE FROM saves WHERE key = ?1", [key])?;
+        Ok(())
     }
 
     pub fn list_matches(&self, limit: u32) -> Result<Vec<StoredMatch>, rusqlite::Error> {
@@ -552,6 +621,23 @@ impl Store {
         .optional()
     }
 
+    /// Remove model checkpoints that cannot be interpreted under a new genome
+    /// schema while preserving human match/replay data. The trainer calls this
+    /// before creating generation-zero rows so stale ids cannot be mixed with
+    /// a fresh population.
+    pub fn reset_model_checkpoints(&self) -> Result<(), rusqlite::Error> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "DELETE FROM champions;
+             DELETE FROM elo_history;
+             DELETE FROM genomes;
+             DELETE FROM training_stats;
+             DELETE FROM trainer_state WHERE key = 'genome_schema_version';",
+        )?;
+        tx.commit()
+    }
+
     /// Atomically persist one generation's genomes and return their ids (in
     /// the same order as `rows`). `rows` = (parent_id, born_from, weights).
     pub fn save_generation(
@@ -720,6 +806,9 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     if version < 5 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V5} COMMIT;"))?;
     }
+    if version < 6 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V6} COMMIT;"))?;
+    }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -736,6 +825,27 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_resume_round_trip_is_single_use() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.latest_save().unwrap().is_none());
+        store
+            .save_game("save:1", "hard", "{\"turn\":7}", "{\"seed\":1}")
+            .unwrap();
+        let save = store.latest_save().unwrap().expect("save exists");
+        assert_eq!(save.key, "save:1");
+        assert_eq!(save.opponent, "hard");
+        assert_eq!(save.game_json, "{\"turn\":7}");
+        assert_eq!(save.replay_json, "{\"seed\":1}");
+        // A newer save wins; resuming consumes it (single-use).
+        store
+            .save_game("save:2", "medium", "{\"turn\":3}", "{}")
+            .unwrap();
+        assert_eq!(store.latest_save().unwrap().unwrap().key, "save:2");
+        store.delete_save("save:2").unwrap();
+        assert_eq!(store.latest_save().unwrap().unwrap().key, "save:1");
+    }
 
     #[test]
     fn incremental_match_fetch_returns_only_newer_rows() {
@@ -910,6 +1020,7 @@ mod tests {
             winner: g.winner,
             reason: g.win_reason,
             duration_turns: g.turn,
+            duration_rounds: g.round,
         });
 
         let id = store

@@ -2,17 +2,20 @@
 //! application, action budget, win check, and helpers shared by the other
 //! modules.
 //!
-//! The game is strictly alternating-turn: only `self.active` may issue
+//! The game is strictly alternating-activation: only `self.active` may issue
 //! commands; they execute immediately. [`Command::EndTurn`] runs the
-//! end-of-turn resolution (turret fire → sweep → fog → win check) and then
-//! the opponent's start-of-turn (income → production → unit resets → fog).
+//! end-of-activation resolution (turret fire → sweep → fog → win check) and
+//! then the opponent's start-of-activation (income → production → unit resets
+//! → fog). A player-facing round is the P0/P1 activation pair; the public
+//! `turn` counter remains the activation/replay compatibility counter.
 
 use serde::{Deserialize, Serialize};
 
 use crate::entity::{
-    building_stats, unit_stats, Building, BuildingType, EntityId, Player, Unit, UnitType,
-    CRYSTAL_REFINERY_PER_TURN, HQ_INCOME_PER_TURN, REFINERY_ORE_PER_TURN, REPAIR_COST_DEN,
-    REPAIR_COST_NUM, REPAIR_HP_DEN, REPAIR_HP_NUM, REPAIR_MIN_COST, RESEARCH_PER_LAB_PER_TURN,
+    building_stats, unit_stats, Building, BuildingType, EntityId, Player, ResourceBundle,
+    ResourceType, Unit, UnitType, CRYSTAL_REFINERY_BASE_YIELD_PER_TURN, HQ_INCOME_PER_TURN,
+    REFINERY_BASE_YIELD_PER_TURN, REPAIR_COST_DEN, REPAIR_COST_NUM, REPAIR_HP_DEN, REPAIR_HP_NUM,
+    REPAIR_MIN_COST, RESEARCH_PER_LAB_PER_TURN,
 };
 use crate::map::Map;
 use crate::orders::{Command, CommandError, NEIGHBOR_OFFSETS};
@@ -26,6 +29,14 @@ pub struct GameConfig {
     /// Actions each player may issue per own turn (`EndTurn` is free).
     pub actions_per_turn: i32,
     pub starting_ore: i32,
+    /// Small opening material reserves keep the first industrial choices
+    /// playable before a remote Steel/Coal refinery is established.
+    #[serde(default)]
+    pub starting_steel: i32,
+    #[serde(default)]
+    pub starting_coal: i32,
+    #[serde(default)]
+    pub starting_crystal: i32,
     /// Fraction of a building's cost refunded on sell (50/100 = 50%).
     pub sell_refund_num: i32,
     pub sell_refund_den: i32,
@@ -41,6 +52,12 @@ impl Default for GameConfig {
             max_queue: 5,
             actions_per_turn: 16,
             starting_ore: 450,
+            // The opening reserve covers one refinery plus the first core
+            // production structure; later steel/coal comes from remote
+            // deposits rather than silently making the factory unbuildable.
+            starting_steel: 300,
+            starting_coal: 100,
+            starting_crystal: 0,
             sell_refund_num: 1,
             sell_refund_den: 2,
             timeout_turns: crate::MATCH_TIMEOUT_TURNS,
@@ -129,6 +146,10 @@ impl ActionBudget {
 pub enum WinReason {
     HqDestroyed,
     Timeout,
+    /// All 10 technologies researched (science victory).
+    ScienceVictory,
+    /// Controls ≥ 60% of passable, explored tiles (domination).
+    MapControl,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -151,6 +172,14 @@ pub enum EventKind {
         id: EntityId,
         owner: Player,
     },
+    /// Generic extraction event for the four deposit types.
+    ResourceMined {
+        player: Player,
+        resource: ResourceType,
+        amount: i32,
+    },
+    /// Legacy event shapes retained for old consumers; new games emit
+    /// `ResourceMined` instead.
     OreMined {
         player: Player,
         amount: i32,
@@ -177,7 +206,7 @@ pub enum EventKind {
     Sold {
         player: Player,
         btype: BuildingType,
-        refund: i32,
+        refund: ResourceBundle,
     },
 }
 
@@ -185,6 +214,10 @@ pub enum EventKind {
 pub struct GameEvent {
     pub turn: i32,
     pub kind: EventKind,
+}
+
+fn initial_round() -> i32 {
+    1
 }
 
 /// The complete match state. The only mutable root of the simulation.
@@ -195,13 +228,25 @@ pub struct Game {
     pub buildings: Vec<Building>,
     pub units: Vec<Unit>,
     pub ore: [i32; 2],
+    /// Banked Steel extracted from Steel deposits.
+    #[serde(default)]
+    pub steel: [i32; 2],
+    /// Banked Coal extracted from Coal deposits.
+    #[serde(default)]
+    pub coal: [i32; 2],
     /// Strategic crystal stockpile (spent on top-tier research).
     pub crystal: [i32; 2],
     /// Per-player research state.
     pub research: [PlayerResearch; 2],
-    /// Current turn number, starting at 1.
+    /// Monotonic activation number, starting at 1. This remains the replay
+    /// and timeout compatibility counter; use `round` for the player-facing
+    /// human+AI cycle.
     pub turn: i32,
-    /// Whose turn it is.
+    /// Player-facing round number, starting at 1. P0 and P1 activations share
+    /// a round; it advances when P1 hands control back to P0.
+    #[serde(default = "initial_round")]
+    pub round: i32,
+    /// Whose activation it is.
     pub active: Player,
     pub winner: Option<Player>,
     pub win_reason: Option<WinReason>,
@@ -211,6 +256,11 @@ pub struct Game {
     pub over: bool,
     pub budgets: [ActionBudget; 2],
     pub next_id: EntityId,
+    /// All entity ids in allocation order, including entities removed after
+    /// death or sale. This is runtime-only bookkeeping used by replay/ghost
+    /// consumers to preserve creation-rank references across casualties.
+    #[serde(skip)]
+    pub entity_history: Vec<(EntityId, Player)>,
     pub events: Vec<GameEvent>,
     /// Number of commands dropped by the action budget, per player.
     pub dropped_commands: [u32; 2],
@@ -233,18 +283,21 @@ impl Game {
                 max_hp: stats.hp,
                 queue: Vec::new(),
                 progress: 0,
+                construction_progress: 0,
                 cooldown: 0,
                 repaired_this_turn: false,
             });
             next_id += 1;
         }
-        Game {
+        let mut game = Game {
             config: config.clone(),
             map,
             buildings,
             units: Vec::new(),
             ore: [config.starting_ore; 2],
-            crystal: [0; 2],
+            steel: [config.starting_steel; 2],
+            coal: [config.starting_coal; 2],
+            crystal: [config.starting_crystal; 2],
             research: [
                 PlayerResearch {
                     points: 0,
@@ -258,6 +311,7 @@ impl Game {
                 },
             ],
             turn: 1,
+            round: 1,
             active: Player::P0,
             winner: None,
             win_reason: None,
@@ -267,13 +321,19 @@ impl Game {
                 ActionBudget::new(config.actions_per_turn),
             ],
             next_id,
+            entity_history: vec![(1, Player::P0), (2, Player::P1)],
             events: Vec::new(),
             dropped_commands: [0, 0],
             fog: [
                 crate::fog::FogMemory::default(),
                 crate::fog::FogMemory::default(),
             ],
-        }
+        };
+        // A new match starts with the HQs' immediate vision recorded. This
+        // makes the first state diff and first tile inspection useful without
+        // requiring a no-op command to prime fog memory.
+        game.fog_phase();
+        game
     }
 
     // -- lookups -------------------------------------------------------------
@@ -282,6 +342,44 @@ impl Game {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    pub(crate) fn record_entity_creation(&mut self, id: EntityId, owner: Player) {
+        self.entity_history.push((id, owner));
+    }
+
+    /// Entity ids in allocator order, including dead and sold entities. The
+    /// fallback keeps hand-built legacy fixtures useful when they do not
+    /// populate runtime history.
+    pub fn entity_ids_in_creation_order(&self, owner: Player) -> Vec<EntityId> {
+        let mut ids: Vec<EntityId> = self
+            .entity_history
+            .iter()
+            .filter(|(_, p)| *p == owner)
+            .map(|(id, _)| *id)
+            .collect();
+        // Hand-built fixtures and old deserialized snapshots may have a
+        // partially populated history. Preserve the recorded prefix, then
+        // append any currently-live ids in allocator order. Normal games
+        // never take this branch because every constructor records its id;
+        // the fallback keeps ghost/replay consumers correct for legacy state
+        // instead of silently dropping manually inserted entities.
+        let mut missing: Vec<EntityId> = self
+            .units
+            .iter()
+            .filter(|u| u.owner == owner)
+            .map(|u| u.id)
+            .chain(
+                self.buildings
+                    .iter()
+                    .filter(|b| b.owner == owner)
+                    .map(|b| b.id),
+            )
+            .filter(|id| !ids.contains(id))
+            .collect();
+        missing.sort_unstable();
+        ids.extend(missing);
+        ids
     }
 
     pub fn unit(&self, player: Player, id: EntityId) -> Option<&Unit> {
@@ -342,6 +440,80 @@ impl Game {
         });
     }
 
+    /// The four-resource stockpile for `player`.
+    pub fn resources(&self, player: Player) -> ResourceBundle {
+        let i = player.index();
+        ResourceBundle::new(self.ore[i], self.steel[i], self.coal[i], self.crystal[i])
+    }
+
+    pub fn can_afford(&self, player: Player, price: ResourceBundle) -> bool {
+        self.resources(player).can_afford(price)
+    }
+
+    pub fn spend_resources(&mut self, player: Player, price: ResourceBundle) -> bool {
+        let Some(remaining) = self.resources(player).checked_sub(price) else {
+            return false;
+        };
+        let i = player.index();
+        self.ore[i] = remaining.ore;
+        self.steel[i] = remaining.steel;
+        self.coal[i] = remaining.coal;
+        self.crystal[i] = remaining.crystal;
+        true
+    }
+
+    pub fn add_resources(&mut self, player: Player, amount: ResourceBundle) {
+        let i = player.index();
+        let updated = self.resources(player).saturating_add(amount);
+        self.ore[i] = updated.ore;
+        self.steel[i] = updated.steel;
+        self.coal[i] = updated.coal;
+        self.crystal[i] = updated.crystal;
+    }
+
+    /// Per-turn income estimate from the current HQ/refinery state. Deposits
+    /// are inexhaustible: only the static richness tier affects the yield.
+    /// This is used by the client HUD and does not mutate the game.
+    pub fn resource_income(&self, player: Player) -> ResourceBundle {
+        let mut income = ResourceBundle::new(HQ_INCOME_PER_TURN, 0, 0, 0);
+        let yield_num = self.tech_effects(player).yield_num;
+        for b in self
+            .buildings
+            .iter()
+            .filter(|b| b.owner == player && b.is_operational() && b.btype.is_refinery())
+        {
+            if let Some(resource) = self.map.resource_at(b.tile.0, b.tile.1) {
+                if !self.map.has_resource_at(b.tile.0, b.tile.1) {
+                    continue;
+                }
+                let amount = self
+                    .refinery_yield(resource, self.map.resource_richness_at(b.tile.0, b.tile.1))
+                    * yield_num
+                    / 100;
+                match resource {
+                    ResourceType::Ore => income.ore += amount,
+                    ResourceType::Steel => income.steel += amount,
+                    ResourceType::Coal => income.coal += amount,
+                    ResourceType::Crystal => income.crystal += amount,
+                }
+            }
+        }
+        income
+    }
+
+    /// The base extraction rate for a resource at a richness tier.
+    pub fn refinery_yield(&self, resource: ResourceType, richness: u8) -> i32 {
+        if richness == 0 {
+            return 0;
+        }
+        let base = if resource == ResourceType::Crystal {
+            CRYSTAL_REFINERY_BASE_YIELD_PER_TURN
+        } else {
+            REFINERY_BASE_YIELD_PER_TURN
+        };
+        base * i32::from(richness.clamp(1, 3))
+    }
+
     /// Per-tile blocked overlay: tiles occupied by a building (terrain
     /// passability is separate, in [`Map::passable`]).
     pub fn blocked_grid(&self) -> Vec<bool> {
@@ -360,7 +532,7 @@ impl Game {
         let mut consumed = 0;
         let e = self.tech_effects(player);
         for b in &self.buildings {
-            if b.owner == player && b.is_alive() {
+            if b.owner == player && b.is_operational() {
                 let stats = building_stats(b.btype);
                 if stats.power > 0 {
                     // Superconductors boosts power-plant output.
@@ -412,8 +584,9 @@ impl Game {
         match cmd {
             Command::PlaceBuilding { btype, tile, .. } => {
                 let stats = building_stats(btype);
-                self.ore[player.index()] -= stats.cost;
+                let _ = self.spend_resources(player, stats.resource_cost);
                 let id = self.alloc_id();
+                self.record_entity_creation(id, player);
                 self.buildings.push(Building {
                     id,
                     owner: player,
@@ -423,6 +596,7 @@ impl Game {
                     max_hp: stats.hp,
                     queue: Vec::new(),
                     progress: 0,
+                    construction_progress: 0,
                     cooldown: 0,
                     repaired_this_turn: false,
                 });
@@ -437,7 +611,7 @@ impl Game {
                 building, utype, ..
             } => {
                 let stats = unit_stats(utype);
-                self.ore[player.index()] -= stats.cost;
+                let _ = self.spend_resources(player, stats.resource_cost);
                 if let Some(b) = self.building_mut(player, building) {
                     b.queue.push(utype);
                 }
@@ -446,6 +620,10 @@ impl Game {
                 units, waypoint, ..
             } => {
                 self.execute_move_group(player, &units, waypoint);
+                self.fog_phase();
+            }
+            Command::ClearMove { units, .. } => {
+                self.execute_clear_move(player, &units);
                 self.fog_phase();
             }
             Command::Attack { units, target, .. } => {
@@ -462,9 +640,10 @@ impl Game {
                 let btype = self.building(player, building).map(|b| b.btype);
                 if let Some(bt) = btype {
                     let stats = building_stats(bt);
-                    let refund =
-                        stats.cost * self.config.sell_refund_num / self.config.sell_refund_den;
-                    self.ore[player.index()] += refund;
+                    let refund = stats
+                        .resource_cost
+                        .scaled_floor(self.config.sell_refund_num, self.config.sell_refund_den);
+                    self.add_resources(player, refund);
                     self.push_event(EventKind::Sold {
                         player,
                         btype: bt,
@@ -476,15 +655,23 @@ impl Game {
                 }
             }
             Command::Repair { building, .. } => {
-                let cost = self.repair_cost(building).unwrap_or(REPAIR_MIN_COST);
-                if self.ore[player.index()] >= cost {
-                    if let Some(b) = self
+                let cost = self.repair_cost(building).unwrap_or(ResourceBundle::new(
+                    REPAIR_MIN_COST,
+                    0,
+                    0,
+                    0,
+                ));
+                if self.can_afford(player, cost) {
+                    let index = self
                         .buildings
-                        .iter_mut()
-                        .find(|b| b.id == building && b.owner == player && b.is_alive())
-                    {
-                        if !b.repaired_this_turn && b.hp < b.max_hp {
-                            self.ore[player.index()] -= cost;
+                        .iter()
+                        .position(|b| b.id == building && b.owner == player && b.is_alive());
+                    if let Some(index) = index {
+                        if !self.buildings[index].repaired_this_turn
+                            && self.buildings[index].hp < self.buildings[index].max_hp
+                        {
+                            let _ = self.spend_resources(player, cost);
+                            let b = &mut self.buildings[index];
                             b.repaired_this_turn = true;
                             b.hp = (b.hp + b.max_hp * REPAIR_HP_NUM / REPAIR_HP_DEN).min(b.max_hp);
                         }
@@ -497,64 +684,155 @@ impl Game {
         }
     }
 
-    /// The ore cost of repairing `building` this turn (its remaining missing
-    /// HP determines the charge); `None` when it cannot be repaired.
-    pub fn repair_cost(&self, building: EntityId) -> Option<i32> {
+    /// The resource cost of repairing `building` this turn (the building's
+    /// blueprint price scaled by the repair fraction); `None` when it cannot
+    /// be repaired.
+    pub fn repair_cost(&self, building: EntityId) -> Option<ResourceBundle> {
         let b = self.any_building(building)?;
         if !b.is_alive() || b.hp >= b.max_hp {
             return None;
         }
-        let cost = building_stats(b.btype).cost * REPAIR_COST_NUM / REPAIR_COST_DEN;
-        Some(cost.max(REPAIR_MIN_COST))
+        let mut cost = building_stats(b.btype)
+            .resource_cost
+            .scaled_floor(REPAIR_COST_NUM, REPAIR_COST_DEN);
+        if cost.total_value() < REPAIR_MIN_COST {
+            cost.ore = REPAIR_MIN_COST;
+        }
+        Some(cost)
     }
 
     // -- movement ------------------------------------------------------------
 
+    /// Set or replace a durable destination, then consume as much of the
+    /// current activation's MP as possible. The target is retained in the
+    /// unit so later own turns can continue the same march automatically.
     fn execute_move_group(&mut self, player: Player, units: &[EntityId], waypoint: (u8, u8)) {
         let blocked = self.blocked_grid();
-        // The ordered waypoint is often a building (e.g. the enemy HQ, a
-        // refinery to seize): `find_path` refuses a blocked destination, so
-        // retarget to the nearest free tile beside it — armies march *next
-        // to* structures, never onto them.
+        // The ordered waypoint is often a building (e.g. the enemy HQ):
+        // retarget to the nearest free tile beside it so ground units march
+        // next to structures rather than onto them. Aircraft may still use
+        // the original tile as their destination.
         let target = if blocked[crate::map::tile_index(waypoint.0, waypoint.1)] {
             self.nearest_free_tile(waypoint).unwrap_or(waypoint)
         } else {
             waypoint
         };
         for &id in units {
-            let Some(u) = self.unit(player, id) else {
-                continue;
-            };
-            if !u.is_alive() || u.mp <= 0 || u.moved {
-                continue;
-            }
-            let fly = unit_stats(u.utype).air;
-            let Some(path) = self.map.find_path(u.tile, target, &blocked, fly) else {
-                continue;
-            };
-            // Walk as far as MP allows, paying each tile's terrain movement
-            // cost and stopping before any occupied tile.
-            let mut spent = 0i32;
-            let mut dest = u.tile;
-            for &n in path.iter() {
-                let cost = self.map.move_cost(dest, n, fly);
-                if spent + cost > u.mp {
-                    break;
-                }
-                if self.unit_at(n).is_some() {
-                    break;
-                }
-                spent += cost;
-                dest = n;
-            }
-            if spent > 0 {
-                if let Some(u) = self.unit_mut(player, id) {
-                    u.tile = dest;
-                    u.mp -= spent;
-                    u.moved = true;
+            if let Some(u) = self.unit_mut(player, id) {
+                if u.is_alive() {
+                    u.move_target = Some(target);
                 }
             }
         }
+        self.resolve_move_orders_for(player, units);
+    }
+
+    fn execute_clear_move(&mut self, player: Player, units: &[EntityId]) {
+        for &id in units {
+            if let Some(u) = self.unit_mut(player, id) {
+                u.move_target = None;
+            }
+        }
+    }
+
+    /// Resolve a subset of movement orders in the supplied order. Callers that
+    /// need fully deterministic whole-army behavior pass ascending entity ids.
+    fn resolve_move_orders_for(&mut self, player: Player, requested: &[EntityId]) {
+        let mut ids: Vec<EntityId> = requested
+            .iter()
+            .copied()
+            .filter(|id| self.unit(player, *id).is_some())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            self.resolve_unit_move(id);
+        }
+    }
+
+    /// Resolve every durable order for `player` at the start of that player's
+    /// activation. Units are processed by creation id, so group movement and
+    /// temporary unit blockers resolve identically on native and WASM.
+    fn resolve_all_move_orders(&mut self, player: Player) {
+        let ids: Vec<EntityId> = self
+            .units
+            .iter()
+            .filter(|u| u.owner == player && u.is_alive() && u.move_target.is_some())
+            .map(|u| u.id)
+            .collect();
+        self.resolve_move_orders_for(player, &ids);
+    }
+
+    fn resolve_unit_move(&mut self, id: EntityId) {
+        let Some((mut target, mp, fly, from)) = self
+            .units
+            .iter()
+            .find(|u| u.id == id)
+            .map(|u| (u.move_target, u.mp, unit_stats(u.utype).air, u.tile))
+        else {
+            return;
+        };
+        let Some(mut target_tile) = target.take() else {
+            return;
+        };
+        if mp <= 0 {
+            return;
+        }
+
+        let blocked = self.blocked_grid();
+        if !fly && blocked[crate::map::tile_index(target_tile.0, target_tile.1)] {
+            target_tile = self.nearest_free_tile(target_tile).unwrap_or(target_tile);
+            if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
+                u.move_target = Some(target_tile);
+            }
+        }
+        let Some(path) = self.map.find_path(from, target_tile, &blocked, fly) else {
+            return;
+        };
+
+        // Walk as far as MP allows, paying each destination tile's terrain
+        // cost and stopping before any tile occupied by another unit. A unit
+        // blocker is temporary: the durable target remains for the next turn.
+        let mut spent = 0i32;
+        let mut dest = from;
+        for &next in &path {
+            let cost = self.map.move_cost(dest, next, fly);
+            if spent + cost > mp {
+                break;
+            }
+            if self.unit_at(next).is_some_and(|occupant| occupant != id) {
+                break;
+            }
+            spent += cost;
+            dest = next;
+        }
+        if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
+            if spent > 0 {
+                u.tile = dest;
+                u.mp -= spent;
+                u.moved = true;
+            }
+            if dest == target_tile {
+                u.move_target = None;
+            }
+        }
+    }
+
+    /// Preview the deterministic route for a unit's current durable order.
+    /// This is presentation data only; execution still happens through the
+    /// same server-side resolver.
+    pub fn movement_path(&self, id: EntityId) -> Option<Vec<(u8, u8)>> {
+        let u = self.any_unit(id)?;
+        let target = u.move_target?;
+        let blocked = self.blocked_grid();
+        let target =
+            if !unit_stats(u.utype).air && blocked[crate::map::tile_index(target.0, target.1)] {
+                self.nearest_free_tile(target)?
+            } else {
+                target
+            };
+        self.map
+            .find_path(u.tile, target, &blocked, unit_stats(u.utype).air)
     }
 
     // -- combat ----------------------------------------------------------------
@@ -769,7 +1047,7 @@ impl Game {
         let turret_ids: Vec<EntityId> = self
             .buildings
             .iter()
-            .filter(|b| b.owner == finished && b.is_alive())
+            .filter(|b| b.owner == finished && b.is_operational())
             .filter(|b| building_stats(b.btype).damage > 0)
             .map(|b| b.id)
             .collect();
@@ -860,107 +1138,53 @@ impl Game {
         // 2. Hand over to the opponent and run their start-of-turn.
         self.active = finished.enemy();
         self.turn += 1;
+        if finished == Player::P1 {
+            self.round += 1;
+        }
         self.start_of_turn(self.active);
     }
 
     /// Start-of-turn resolution for `player`: income, production, resets.
     fn start_of_turn(&mut self, player: Player) {
-        // Income: HQ trickle + refineries draining adjacent ore tiles. The
-        // Efficient Refining tech scales the per-refinery cap.
-        self.ore[player.index()] += HQ_INCOME_PER_TURN;
+        self.advance_construction(player);
+
+        // HQ income is the only passive income that does not need a claimed
+        // deposit. Every operational refinery then extracts the static richness-scaled
+        // yield from the resource tile underneath it. Deposits never deplete.
+        self.add_resources(player, ResourceBundle::new(HQ_INCOME_PER_TURN, 0, 0, 0));
         let yield_num = self.tech_effects(player).yield_num;
-        let ore_cap = REFINERY_ORE_PER_TURN * yield_num / 100;
         let refinery_ids: Vec<EntityId> = self
             .buildings
             .iter()
-            .filter(|b| b.owner == player && b.is_alive() && b.btype == BuildingType::Refinery)
+            .filter(|b| b.owner == player && b.is_operational() && b.btype.is_refinery())
             .map(|b| b.id)
             .collect();
         for rid in refinery_ids {
-            let Some(b) = self.buildings.iter().find(|b| b.id == rid) else {
+            let Some((resource, richness)) =
+                self.buildings.iter().find(|b| b.id == rid).and_then(|b| {
+                    self.map.resource_at(b.tile.0, b.tile.1).map(|resource| {
+                        (resource, self.map.resource_richness_at(b.tile.0, b.tile.1))
+                    })
+                })
+            else {
                 continue;
             };
-            let (bx, by) = b.tile;
-            // Adjacent ore tiles in ascending tile-index order.
-            let mut adjacent: Vec<(u8, u8)> = NEIGHBOR_OFFSETS
-                .iter()
-                .filter_map(|&(dx, dy)| {
-                    let (x, y) = (bx as i32 + dx, by as i32 + dy);
-                    if x >= 0
-                        && y >= 0
-                        && (x as usize) < crate::map::MAP_SIZE
-                        && (y as usize) < crate::map::MAP_SIZE
-                        && self.map.ore_at(x as u8, y as u8) > 0
-                    {
-                        Some((x as u8, y as u8))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            adjacent.sort_by_key(|t| crate::map::tile_index(t.0, t.1));
-            let mut mined = 0;
-            for t in adjacent {
-                if mined >= ore_cap {
-                    break;
-                }
-                mined += self.map.deplete_ore(t.0, t.1, ore_cap - mined);
-            }
-            if mined > 0 {
-                self.ore[player.index()] += mined;
-                self.push_event(EventKind::OreMined {
-                    player,
-                    amount: mined,
-                });
-            }
-        }
-
-        // Crystal income: crystal refineries drain adjacent crystal fields.
-        let crystal_cap = CRYSTAL_REFINERY_PER_TURN * yield_num / 100;
-        let crystal_ids: Vec<EntityId> = self
-            .buildings
-            .iter()
-            .filter(|b| {
-                b.owner == player && b.is_alive() && b.btype == BuildingType::CrystalRefinery
-            })
-            .map(|b| b.id)
-            .collect();
-        for rid in crystal_ids {
-            let Some(b) = self.buildings.iter().find(|b| b.id == rid) else {
+            let extracted = self.refinery_yield(resource, richness) * yield_num / 100;
+            if extracted <= 0 {
                 continue;
+            }
+            let amount = match resource {
+                ResourceType::Ore => ResourceBundle::new(extracted, 0, 0, 0),
+                ResourceType::Steel => ResourceBundle::new(0, extracted, 0, 0),
+                ResourceType::Coal => ResourceBundle::new(0, 0, extracted, 0),
+                ResourceType::Crystal => ResourceBundle::new(0, 0, 0, extracted),
             };
-            let (bx, by) = b.tile;
-            let mut adjacent: Vec<(u8, u8)> = NEIGHBOR_OFFSETS
-                .iter()
-                .filter_map(|&(dx, dy)| {
-                    let (x, y) = (bx as i32 + dx, by as i32 + dy);
-                    if x >= 0
-                        && y >= 0
-                        && (x as usize) < crate::map::MAP_SIZE
-                        && (y as usize) < crate::map::MAP_SIZE
-                        && self.map.crystal_at(x as u8, y as u8) > 0
-                    {
-                        Some((x as u8, y as u8))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            adjacent.sort_by_key(|t| crate::map::tile_index(t.0, t.1));
-            let mut mined = 0;
-            for t in adjacent {
-                if mined >= crystal_cap {
-                    break;
-                }
-                mined += self.map.deplete_crystal(t.0, t.1, crystal_cap - mined);
-            }
-            if mined > 0 {
-                self.crystal[player.index()] += mined;
-                self.push_event(EventKind::CrystalMined {
-                    player,
-                    amount: mined,
-                });
-            }
+            self.add_resources(player, amount);
+            self.push_event(EventKind::ResourceMined {
+                player,
+                resource,
+                amount: extracted,
+            });
         }
 
         // Research: each Tech Lab generates points; a started tech completes
@@ -992,7 +1216,7 @@ impl Game {
             let producer_ids: Vec<EntityId> = self
                 .buildings
                 .iter()
-                .filter(|b| b.owner == player && b.is_alive() && !b.queue.is_empty())
+                .filter(|b| b.owner == player && b.is_operational() && !b.queue.is_empty())
                 .map(|b| b.id)
                 .collect();
             for bid in producer_ids {
@@ -1049,8 +1273,28 @@ impl Game {
                 u.acted = false;
             }
         }
+        // Durable routes resolve automatically as part of the unit's own
+        // turn, after fresh MP has been granted and newly-produced units have
+        // been spawned.
+        self.resolve_all_move_orders(player);
 
         self.fog_phase();
+    }
+
+    /// Advance construction sites owned by `player` by one turn. Sites reserve
+    /// their tile immediately but do not provide any capability until this
+    /// progress reaches the blueprint duration.
+    fn advance_construction(&mut self, player: Player) {
+        for building in self
+            .buildings
+            .iter_mut()
+            .filter(|b| b.owner == player && b.is_alive())
+        {
+            let duration = building.construction_time();
+            if building.construction_progress < duration {
+                building.construction_progress = (building.construction_progress + 1).min(duration);
+            }
+        }
     }
 
     /// A free passable tile adjacent to `tile` for spawning a produced unit.
@@ -1089,6 +1333,7 @@ impl Game {
         let stats = unit_stats(utype);
         let max_hp = self.effective_max_hp(utype, owner);
         let id = self.alloc_id();
+        self.record_entity_creation(id, owner);
         self.units.push(Unit {
             id,
             owner,
@@ -1097,6 +1342,7 @@ impl Game {
             hp: max_hp,
             max_hp,
             mp: stats.mp,
+            move_target: None,
             moved: false,
             acted: false,
         });
@@ -1155,6 +1401,20 @@ impl Game {
     /// cannot win the game, and counting it rewards hoarding (a turtle that
     /// never fights beats an army-builder at timeout). The stronger fielded
     /// force is the decisive side.
+    /// Number of technologies researched by `player`.
+    pub fn tech_count(&self, player: Player) -> usize {
+        self.research[player.index()].researched.len()
+    }
+
+    /// Fraction of passable tiles currently visible to `player` (0..=100).
+    /// Used for the map-control victory condition.
+    pub fn map_control_percent(&self, player: Player) -> i32 {
+        let view = self.fog_view(player);
+        let explored = view.explored.iter().filter(|&&e| e).count();
+        let passable = self.map.passable.iter().filter(|&&p| p).count().max(1);
+        (explored * 100 / passable) as i32
+    }
+
     pub fn remaining_value(&self, player: Player) -> i32 {
         let mut value = 0;
         for u in &self.units {
@@ -1194,6 +1454,32 @@ impl Game {
         if p1_dead {
             self.winner = Some(Player::P0);
             self.win_reason = Some(WinReason::HqDestroyed);
+            self.over = true;
+            return;
+        }
+        // Alternative victory: science (all 10 techs researched).
+        if self.tech_count(Player::P0) >= 10 {
+            self.winner = Some(Player::P0);
+            self.win_reason = Some(WinReason::ScienceVictory);
+            self.over = true;
+            return;
+        }
+        if self.tech_count(Player::P1) >= 10 {
+            self.winner = Some(Player::P1);
+            self.win_reason = Some(WinReason::ScienceVictory);
+            self.over = true;
+            return;
+        }
+        // Alternative victory: map control (≥ 60% of passable tiles explored).
+        if self.map_control_percent(Player::P0) >= 60 {
+            self.winner = Some(Player::P0);
+            self.win_reason = Some(WinReason::MapControl);
+            self.over = true;
+            return;
+        }
+        if self.map_control_percent(Player::P1) >= 60 {
+            self.winner = Some(Player::P1);
+            self.win_reason = Some(WinReason::MapControl);
             self.over = true;
             return;
         }

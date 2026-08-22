@@ -36,6 +36,7 @@ export async function frame(replayJson: string, turn: number): Promise<ReplayFra
 export async function result(replayJson: string): Promise<{
   reason: string | null;
   duration_turns: number;
+  duration_rounds?: number;
   hash: number;
 }> {
   await wasmInit();

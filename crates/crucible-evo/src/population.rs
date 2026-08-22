@@ -20,8 +20,8 @@ pub struct EsParams {
 impl Default for EsParams {
     fn default() -> Self {
         EsParams {
-            population_size: 64,
-            mu: 16,
+            population_size: 96,
+            mu: 24,
             sigma: 0.02,
             sigma_min: 0.005,
             sigma_decay: 0.995,

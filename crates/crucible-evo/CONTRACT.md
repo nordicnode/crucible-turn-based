@@ -22,7 +22,7 @@ parallelism (rayon), and match execution.
 - Fitness per genome = mean over the evaluation set:
   win +1.0 / draw +0.1 / loss −1.0, plus margin shaping
   `0.25 × (own_remaining − enemy_remaining) / total`, minus anti-rush damping
-  `0.2` if the match ends < 2 min. Exact weights live in `config.toml` and are
+  `0.2` if the match ends < 12 turns. Exact weights live in `config.toml` and are
   injected, not hardcoded.
 - Evaluation set per generation: 8 matches/genome — 4 self-play vs sampled
   population, 2 vs champion, 2 vs ghosts — with both spawn sides played.
@@ -105,10 +105,10 @@ parallelism (rayon), and match execution.
   bug). Under positional combat (formation spread, separation, building
   collision) the counters are stronger but still non-trivial; the committed
   v1 tune gives tank>infantry 81%, artillery>tank 72%, infantry>artillery 72%.
-- Match-length p50 targets 5–10 min. `match_length_p50_within_band` asserts
-  both bot tiers land in the band (rush-vs-turtle ~5.0 min,
-  hard-vs-medium ~8.3 min); the turtle's finite, never-rebuilt turrets are
-  what let sustained waves break through instead of stalemating.
+- Match-length p50 targets 40–90 turns. `match_length_p50_within_band` asserts
+  both bot tiers land in the band (medium-vs-easy and hard-vs-medium). The
+  turtle's finite, never-rebuilt turrets are what let sustained waves break
+  through instead of stalemating.
 
 ## 7. Guarantees to dependents
 

@@ -52,7 +52,7 @@ and injected.
 
 1. `tick += 1`; APM budgets refill.
 2. Cooldowns decrement (units, then buildings).
-3. `economy_phase` — harvester mining/hauling/dock-and-deposit/flee (income comes only from deposits; refineries give no passive trickle).
+3. `start_of_turn` — HQ ore trickle + refinery extraction (each refinery extracts its tile's resource, scaled by richness tier; deposits are infinite and never deplete).
 4. `production_phase` — queues progress; completed units spawn (id order).
 5. `combat_phase` — per combat unit: acquire target, move, fire (id order).
 6. `turret_phase` — turrets fire (id order).
@@ -65,43 +65,47 @@ Reordering these changes determinism and requires a golden-hash update.
 
 ## 3a. Movement contract
 
-- Buildings are **blocking** for ground units: `step_towards`/`find_path`
-  take a per-tick `blocked` overlay (building tiles), so units path around
-  and never walk through buildings. `Game::blocked_grid()` builds the
-  overlay. **Aircraft** (`unit_stats(utype).air`) fly over buildings — the
-  overlay is skipped for them — but still respect map terrain passability.
-- `MoveGroup` spreads the group around the waypoint in a deterministic
-  one-tile ring (`movement::formation_tile`), so a group arrives as a cluster
-  instead of stacking on one tile.
-- Units never stack: `separation_phase` pushes overlapping units apart in
-  ascending-id order (only the later id moves).
-- Each side starts with **one Harvester** adjacent to its HQ (visible mining
-  loop from tick 0).
+- Movement is turn-based: each unit has movement points (MP) per turn. A
+  `MoveGroup` sets a durable destination; the sim resolves as many steps as
+  MP allows immediately, and the destination is retained so later turns
+  continue the march automatically (Civ-style multi-turn movement).
+- Buildings are **blocking** for ground units: `find_path` takes a `blocked`
+  overlay (building tiles), so units path around and never walk through
+  buildings. `Game::blocked_grid()` builds the overlay. **Aircraft**
+  (`unit_stats(utype).air`) fly over buildings — the overlay is skipped for
+  them — but still respect map terrain passability.
+- `ClearMove` cancels a durable destination without changing the unit's
+  current position or MP.
+- Units do not stack: movement stops before a tile occupied by another unit.
+- Terrain affects movement: forests/hills cost ×2, swamps/rivers cost ×3,
+  deserts/plains cost ×1. Mountains and lakes are impassable.
 
 ## 4. Command & validation contract
 
 - The complete action space is `orders::Command`: `PlaceBuilding`,
-  `TrainUnit`, `MoveGroup`, `Attack`, `SetRally`, `ChooseUpgrade`, `Sell`,
-  `Repair`.
+  `TrainUnit`, `MoveGroup`, `ClearMove`, `Attack`, `StartResearch`, `Sell`,
+  `Repair`, `EndTurn`.
 - `Attack` is focus-fire: the ordered units lock onto the single target
-  (unit or building) and ignore everything else, pathing around obstacles
-  toward it. The order lapses to `Idle` once the target dies or leaves
-  vision, after which normal auto-acquire resumes. Harvester-type units
-  (no damage) are rejected with `NotACombatant`.
+  (unit or building) and ignore everything else. A surviving defender in
+  range counterattacks once.
 - **One validator.** `Game::validate_command` is the only validation path;
   `apply_commands` validates, charges the APM budget, then executes. Humans,
   the AI, ghosts, and tests all go through it. No bypass exists.
-- The APM cap (default 120 commands/min) is enforced *inside* the sim as a
-  token bucket in `ApmBudget`; over-budget commands return `RateLimited` and
-  increment `dropped_commands`.
-- Economy rules: train cost is charged at queue time; sell refunds 50%;
-  building placement requires a passable, ore-free, unoccupied tile within
-  `PLACE_RADIUS_TILES` (5) of the *nearest own building* — bases grow in
-  connected clumps, not scattered structures; artillery and Mammoth Tank
+- The per-turn action budget (default 16 actions/turn; `EndTurn` is free) is
+  enforced inside the sim via `ActionBudget`; over-budget commands return
+  `RateLimited`.
+- Economy rules: four resources (Ore, Steel, Coal, Crystal). Train/build
+  costs are charged at issue time across all four stockpiles; sell refunds 50%
+  of the resource cost. Building placement requires a passable,
+  resource-free, unoccupied tile within `PLACE_RADIUS_TILES` (5) of the nearest
+  own building — bases grow in connected clumps. **Refineries are exempt**:
+  they must be placed directly on a live resource deposit tile and extract
+  that resource every turn, scaled by the deposit's richness tier (1–3).
+  Deposits are infinite and never deplete. Artillery and Mammoth Tank
   production require a Tech Lab; Tech Lab placement requires a Factory;
-  Radar and Tesla Coil placement require a Tech Lab; the upgrade (Damage /
-  Hp / Range) is chosen once per player, from any Tech Lab, and applies
-  globally (damage +15%, max HP +15%, attack range +20%).
+  Radar, TeslaCoil, and AATurret placement require a Tech Lab. Research is a
+  10-tech tree (tiered, with prerequisites); each Tech Lab generates research
+  points per turn and one tech may be researched at a time.
 - A match may end as a draw (`winner = null`): simultaneous HQ destruction and
   equal remaining value at timeout are side-neutral terminal results.
 
@@ -111,23 +115,34 @@ Reordering these changes determinism and requires a golden-hash update.
   only input the AI may read). It contains currently-visible tiles,
   remembered enemy units/buildings with `last_seen` ticks, and known ore tiles.
   It cannot contain a live hidden entity.
-- `Game::fog_phase` runs each tick and maintains `FogMemory` in serialized
-  state; remembered positions decay (dropped after 60 s unseen). Hidden
+- `Game::fog_phase` runs each turn and maintains `FogMemory` in serialized
+  state; remembered positions decay (dropped after 6 turns unseen). Hidden
   entity death is never consulted to prune memory; memory is removed only by
   expiry or by re-observing the remembered location.
 
 ## 6. Serialization & replay contract
 
-- `Game` is `Serialize`/`Deserialize` and byte-stable at any tick (field order
+- `Game` is `Serialize`/`Deserialize` and byte-stable at any turn (field order
   is definition order).
 - A replay is an **input log**: `{version, map_seed, config, commands[],
-  result?}` (`serialize::Replay`), not a state dump. `FORMAT_VERSION = 3`.
+  result?}` (`serialize::Replay`), not a state dump. `FORMAT_VERSION = 5`.
   Version envelopes exist from day one; old replays must stay re-runnable.
 
 ## 7. Guarantees to dependents
 
 `crucible-ai`, `crucible-evo`, `crucible-server`, and `crucible-client-wasm`
 may rely on: the determinism guarantees above; the public types re-exported
-from `lib.rs`; and `Map::generate(seed)` producing a point-symmetric,
-fully-connected 64×64 map (mirror `(x,y) -> (63-x,63-y)`), with both HQs
-mutually reachable and every ore tile reachable from both HQs.
+from `lib.rs`; and `Map::generate(seed)` producing a constraint-scored,
+fully-connected 64×64 map with typed terrain (plains/forest/hills/desert/
+swamp/river/lake/mountain), asymmetric but fair spawn envelopes, route-cost
+parity, and every resource tile reachable from both HQs. Deposits are
+infinite; `resource_kind` and `richness` are the authoritative static data.
+
+The map exposes three climate fields — `elevation`, `moisture`, and
+`temperature` (0–255, latitude + elevation cooling + regional noise) — as
+presentation metadata that also drives the biome model: polar latitudes are
+tundra, equatorial wet belts are jungle, and deserts only form in warm
+latitudes. `Game` is fully `Serialize`/`Deserialize`, so the server can
+snapshot a live match and resume it; `Map::generate` output is unchanged in
+guarantees when the climate fields are added (they are `#[serde(default)]`
+for old snapshots).

@@ -38,6 +38,12 @@ pub enum Command {
         units: Vec<EntityId>,
         waypoint: (u8, u8),
     },
+    /// Clear durable movement orders without changing the units' current
+    /// movement points or position.
+    ClearMove {
+        player: Player,
+        units: Vec<EntityId>,
+    },
     /// Attack a specific enemy unit or building with every ordered unit that
     /// is in range and has not acted yet. Advance-Wars damage rules apply
     /// (damage scales with attacker HP; surviving direct defenders counter).
@@ -73,6 +79,7 @@ impl Command {
             Command::PlaceBuilding { player, .. }
             | Command::TrainUnit { player, .. }
             | Command::MoveGroup { player, .. }
+            | Command::ClearMove { player, .. }
             | Command::Attack { player, .. }
             | Command::StartResearch { player, .. }
             | Command::Sell { player, .. }
@@ -92,14 +99,20 @@ impl Command {
 pub enum CommandError {
     NotYourEntity,
     EntityDead,
+    /// The tile is reserved, but the structure has not finished building.
+    BuildingUnderConstruction,
     NotABuilding,
     BuildingCannotTrain,
     RequiresFactory,
     RequiresTechLab,
+    /// Legacy placement errors retained for replay/API compatibility.
     RequiresOreAdjacent,
     RequiresCrystalAdjacent,
+    /// Resource extractors must claim a live deposit tile.
+    RequiresResourceTile,
     TileBlocked,
     TileHasOre,
+    TileHasResource,
     RequiresTech,
     TechPrereqNotMet,
     TechAlreadyResearched,
@@ -125,23 +138,30 @@ impl std::fmt::Display for CommandError {
         let s = match self {
             CommandError::NotYourEntity => "not your entity",
             CommandError::EntityDead => "entity is dead",
+            CommandError::BuildingUnderConstruction => "building is still under construction",
             CommandError::NotABuilding => "not a valid building for this order",
             CommandError::BuildingCannotTrain => "building cannot train this unit",
             CommandError::RequiresFactory => "requires a factory",
             CommandError::RequiresTechLab => "requires a tech lab",
-            CommandError::RequiresOreAdjacent => "refinery must be placed next to an ore tile",
+            CommandError::RequiresOreAdjacent => {
+                "legacy refinery must be placed next to an ore tile"
+            }
             CommandError::RequiresCrystalAdjacent => {
-                "crystal refinery must be placed next to a crystal field"
+                "legacy crystal refinery must be placed next to a crystal field"
+            }
+            CommandError::RequiresResourceTile => {
+                "refinery must be built directly on a resource tile"
             }
             CommandError::TileBlocked => "tile is blocked",
             CommandError::TileHasOre => "tile contains ore or crystal",
+            CommandError::TileHasResource => "tile contains a resource deposit",
             CommandError::RequiresTech => "unit requires a researched technology",
             CommandError::TechPrereqNotMet => "research prerequisites not met",
             CommandError::TechAlreadyResearched => "technology already researched",
             CommandError::AlreadyResearching => "another technology is already being researched",
             CommandError::InvalidTile => "tile out of bounds",
             CommandError::TooFarFromBase => "too far from your base",
-            CommandError::NotEnoughOre => "not enough ore",
+            CommandError::NotEnoughOre => "insufficient resources",
             CommandError::QueueFull => "production queue is full",
             CommandError::EmptyGroup => "empty unit group",
             CommandError::NoSuchTarget => "no such target",
@@ -184,6 +204,7 @@ impl Game {
                 units,
                 waypoint,
             } => self.validate_move(*player, units, *waypoint),
+            Command::ClearMove { player, units } => self.validate_clear_move(*player, units),
             Command::Attack {
                 player,
                 units,
@@ -226,7 +247,8 @@ impl Game {
                 if b.repaired_this_turn {
                     return Err(AlreadyRepaired);
                 }
-                if self.ore[player.index()] < crate::entity::REPAIR_MIN_COST {
+                let repair_cost = self.repair_cost(*building).unwrap_or_default();
+                if !self.can_afford(*player, repair_cost) {
                     return Err(NotEnoughOre);
                 }
                 Ok(())
@@ -255,44 +277,31 @@ impl Game {
         {
             return Err(RequiresFactory);
         }
-        if (btype == BuildingType::Radar || btype == BuildingType::TeslaCoil)
+        if (btype == BuildingType::Radar
+            || btype == BuildingType::TeslaCoil
+            || btype == BuildingType::AATurret)
             && self.count_buildings(player, BuildingType::TechLab) == 0
         {
             return Err(RequiresTechLab);
         }
         self.validate_tile(tile)?;
-        if self.building_at(tile).is_some() {
+        if self.building_at(tile).is_some() || self.unit_at(tile).is_some() {
             return Err(TileBlocked);
         }
-        if self.map.ore_at(tile.0, tile.1) > 0 || self.map.crystal_at(tile.0, tile.1) > 0 {
-            return Err(TileHasOre);
+        let has_resource = self.map.resource_amount_at(tile.0, tile.1) > 0;
+        if has_resource && !btype.is_refinery() {
+            return Err(TileHasResource);
         }
-        let cost = building_stats(btype).cost;
-        if self.ore[player.index()] < cost {
+        let cost = building_stats(btype).resource_cost;
+        if !self.can_afford(player, cost) {
             return Err(NotEnoughOre);
         }
-        if btype == BuildingType::Refinery || btype == BuildingType::CrystalRefinery {
-            // Refineries must touch their resource field — that is their whole
-            // point under passive income. This replaces the clump rule for
-            // them: remote refineries are how you claim an expansion pocket.
-            let adjacent_ore = NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
-                let (x, y) = (tile.0 as i32 + dx, tile.1 as i32 + dy);
-                x >= 0
-                    && y >= 0
-                    && (x as usize) < crate::map::MAP_SIZE
-                    && (y as usize) < crate::map::MAP_SIZE
-                    && if btype == BuildingType::Refinery {
-                        self.map.ore_at(x as u8, y as u8) > 0
-                    } else {
-                        self.map.crystal_at(x as u8, y as u8) > 0
-                    }
-            });
-            if !adjacent_ore {
-                return Err(if btype == BuildingType::Refinery {
-                    RequiresOreAdjacent
-                } else {
-                    RequiresCrystalAdjacent
-                });
+        if btype.is_refinery() {
+            // Refineries claim the exact tile they extract. The legacy
+            // CrystalRefinery variant is accepted as a wire/replay alias, but
+            // it follows the same generic rule and can extract any resource.
+            if !has_resource {
+                return Err(RequiresResourceTile);
             }
         } else if !self.near_own_building(player, tile) {
             return Err(TooFarFromBase);
@@ -311,6 +320,9 @@ impl Game {
         if !b.is_alive() {
             return Err(EntityDead);
         }
+        if !b.is_operational() {
+            return Err(BuildingUnderConstruction);
+        }
         if !building_produces(b.btype).contains(&utype) {
             return Err(BuildingCannotTrain);
         }
@@ -324,8 +336,8 @@ impl Game {
                 return Err(RequiresTech);
             }
         }
-        let cost = unit_stats(utype).cost;
-        if self.ore[player.index()] < cost {
+        let cost = unit_stats(utype).resource_cost;
+        if !self.can_afford(player, cost) {
             return Err(NotEnoughOre);
         }
         if b.queue.len() >= self.config.max_queue {
@@ -349,11 +361,25 @@ impl Game {
             if !u.is_alive() {
                 return Err(EntityDead);
             }
-            if u.mp <= 0 || u.moved {
+            if u.acted {
                 return Err(AlreadyActed);
             }
         }
         self.validate_tile(waypoint)?;
+        Ok(())
+    }
+
+    fn validate_clear_move(&self, player: Player, units: &[EntityId]) -> Result<(), CommandError> {
+        use CommandError::*;
+        if units.is_empty() {
+            return Err(EmptyGroup);
+        }
+        for id in units {
+            let u = self.unit(player, *id).ok_or(NotYourEntity)?;
+            if !u.is_alive() {
+                return Err(EntityDead);
+            }
+        }
         Ok(())
     }
 
@@ -418,7 +444,7 @@ impl Game {
     /// The target tile must be within [`PLACE_RADIUS_TILES`] of at least one own
     /// building (any building, including ones still under construction). This is
     /// what keeps a base in one connected clump instead of scattered structures.
-    /// Refineries are exempt — see `validate_place`.
+    /// Resource refineries are exempt — see `validate_place`.
     fn near_own_building(&self, player: Player, tile: (u8, u8)) -> bool {
         self.buildings
             .iter()
@@ -429,12 +455,13 @@ impl Game {
     pub(crate) fn count_buildings(&self, player: Player, btype: BuildingType) -> usize {
         self.buildings
             .iter()
-            .filter(|b| b.owner == player && b.btype == btype)
+            .filter(|b| b.owner == player && b.btype == btype && b.is_operational())
             .count()
     }
 }
 
-/// The eight neighbor offsets (movement is 8-directional, diagonal costs 1 MP).
+/// The eight neighbor offsets (movement is 8-directional; diagonal steps cost
+/// 2 MP before terrain modifiers).
 pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
     (1, 0),
     (-1, 0),

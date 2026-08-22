@@ -11,6 +11,7 @@
 //! taken at turns 10 / 30 / 60.
 
 use crate::entity::{BuildingType, EntityId, Player, UnitType};
+use crate::map::MAP_SIZE;
 use crate::orders::Command;
 use crate::serialize::snapshot_bytes;
 use crate::{Game, GameConfig, Map};
@@ -22,12 +23,13 @@ pub const SEED: u64 = 12345;
 /// Recorded for the turn-based engine; if any change alters sim behavior
 /// these change and the tests fail.
 ///
-/// Re-recorded after the march fix: `MoveGroup` now retargets a blocked
-/// waypoint (e.g. the enemy HQ) to the nearest free adjacent tile, so the
-/// golden armies actually march out and fight (previously they never moved).
-pub const GOLDEN_10: u64 = 6897779162281885343;
-pub const GOLDEN_30: u64 = 2164363162363943649;
-pub const GOLDEN_60: u64 = 3701182747275299226;
+/// Re-recorded for the asymmetric terrain/deposit generator and its
+/// four-resource economy. `MoveGroup` still retargets blocked waypoints (e.g.
+/// the enemy HQ) to the nearest free adjacent tile, so the golden armies
+/// march out and fight instead of idling at their bases.
+pub const GOLDEN_10: u64 = 8705836429359472139;
+pub const GOLDEN_30: u64 = 1316461416993615253;
+pub const GOLDEN_60: u64 = 7237561463896125980;
 
 pub fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -47,16 +49,21 @@ fn find_building(g: &Game, p: Player, bt: BuildingType) -> EntityId {
         .iter()
         .find(|b| b.owner == p && b.btype == bt)
         .map(|b| b.id)
-        .expect("building missing")
+        .unwrap_or_else(|| panic!("building missing: {bt:?} for {p:?}"))
 }
 
 /// Construct the scripted opening (bases + mixed army queues) at turn 1.
 ///
-/// Refineries are placed on the map's natural ore pocket (their placement
-/// rule requires ore adjacency); everything else clusters around the HQ.
+/// Refineries are placed on the map's natural ore pocket; everything else
+/// clusters around the HQ. Construction is allowed to mature between the
+/// infrastructure and production phases so the golden scenario exercises the
+/// operational-building contract.
 pub fn build_game(seed: u64) -> Game {
     let cfg = GameConfig {
         starting_ore: 100_000,
+        starting_steel: 100_000,
+        starting_coal: 100_000,
+        starting_crystal: 100_000,
         timeout_turns: 10_000,
         ..GameConfig::default()
     };
@@ -68,55 +75,69 @@ pub fn build_game(seed: u64) -> Game {
             let _ = g.apply_commands(g.active, &[Command::EndTurn { player: g.active }]);
         }
         let (hx, hy) = g.hq(p).unwrap().tile;
-        // Nearest ore tile to the HQ (the natural pocket) for the refinery.
+        // The refinery claims the deposit tile itself, so the natural pocket
+        // is both the resource source and the structure's footprint.
         let refinery_tile = nearest_ore_tile(&g, (hx, hy));
         let placements = [
             (BuildingType::PowerPlant, (hx as i32 - 2, hy as i32 - 2)),
             (BuildingType::Factory, (hx as i32, hy as i32 + 2)),
             (BuildingType::Barracks, (hx as i32 + 2, hy as i32 + 2)),
             (BuildingType::Turret, (hx as i32 - 2, hy as i32)),
-            (BuildingType::TechLab, (hx as i32, hy as i32 - 2)),
         ];
         for (bt, (x, y)) in placements {
-            let tile = (x.clamp(0, 63) as u8, y.clamp(0, 63) as u8);
-            let _ = g.apply_commands(
-                p,
-                &[Command::PlaceBuilding {
-                    player: p,
-                    btype: bt,
-                    tile,
-                }],
+            let tile = (
+                x.clamp(0, MAP_SIZE as i32 - 1) as u8,
+                y.clamp(0, MAP_SIZE as i32 - 1) as u8,
+            );
+            let command = Command::PlaceBuilding {
+                player: p,
+                btype: bt,
+                tile,
+            };
+            let result = g.apply_commands(p, std::slice::from_ref(&command));
+            assert_eq!(
+                result,
+                vec![Ok(())],
+                "golden placement {bt:?} at {tile:?} failed: {result:?}"
             );
         }
+        // TechLab requires an operational Factory, not merely a reserved
+        // construction site.
+        let factory = find_building(&g, p, BuildingType::Factory);
+        wait_until_operational(&mut g, p, factory);
+        let techlab = Command::PlaceBuilding {
+            player: p,
+            btype: BuildingType::TechLab,
+            tile: (
+                (hx as i32).clamp(0, MAP_SIZE as i32 - 1) as u8,
+                (hy as i32 - 2).clamp(0, MAP_SIZE as i32 - 1) as u8,
+            ),
+        };
+        assert_eq!(
+            g.apply_commands(p, std::slice::from_ref(&techlab)),
+            vec![Ok(())],
+            "golden placement TechLab failed"
+        );
         if let Some(tile) = refinery_tile {
             let _ = g.apply_commands(
                 p,
                 &[Command::PlaceBuilding {
                     player: p,
                     btype: BuildingType::Refinery,
-                    tile: adjacent_free(&g, tile),
+                    tile,
                 }],
             );
         }
-        // Exercise the new systems: claim the nearest crystal field and start
-        // the research tree (both deterministic search-based placements).
         if let Some(ctile) = nearest_crystal_tile(&g, (hx, hy)) {
             let _ = g.apply_commands(
                 p,
                 &[Command::PlaceBuilding {
                     player: p,
                     btype: BuildingType::CrystalRefinery,
-                    tile: adjacent_free(&g, ctile),
+                    tile: ctile,
                 }],
             );
         }
-        let _ = g.apply_commands(
-            p,
-            &[Command::StartResearch {
-                player: p,
-                tech: crate::tech::TechId::HighExplosive,
-            }],
-        );
     }
 
     for p in Player::ALL {
@@ -125,6 +146,17 @@ pub fn build_game(seed: u64) -> Game {
         }
         let factory = find_building(&g, p, BuildingType::Factory);
         let barracks = find_building(&g, p, BuildingType::Barracks);
+        wait_until_operational(&mut g, p, factory);
+        wait_until_operational(&mut g, p, barracks);
+        let techlab = find_building(&g, p, BuildingType::TechLab);
+        wait_until_operational(&mut g, p, techlab);
+        let _ = g.apply_commands(
+            p,
+            &[Command::StartResearch {
+                player: p,
+                tech: crate::tech::TechId::HighExplosive,
+            }],
+        );
         let cmds = [
             Command::TrainUnit {
                 player: p,
@@ -163,6 +195,17 @@ pub fn build_game(seed: u64) -> Game {
     g
 }
 
+fn wait_until_operational(g: &mut Game, player: Player, building: EntityId) {
+    while !g
+        .building(player, building)
+        .is_some_and(|b| b.is_operational())
+    {
+        let active = g.active;
+        let result = g.apply_commands(active, &[Command::EndTurn { player: active }]);
+        assert_eq!(result, vec![Ok(())]);
+    }
+}
+
 fn nearest_crystal_tile(g: &Game, from: (u8, u8)) -> Option<(u8, u8)> {
     let mut best: Option<(i32, (u8, u8))> = None;
     for (idx, &amount) in g.map.crystal.iter().enumerate() {
@@ -191,27 +234,6 @@ fn nearest_ore_tile(g: &Game, from: (u8, u8)) -> Option<(u8, u8)> {
         }
     }
     best.map(|(_, t)| t)
-}
-
-/// A free passable tile adjacent to `t` (ascending index order), falling back
-/// to `t` itself when every neighbor is blocked.
-fn adjacent_free(g: &Game, t: (u8, u8)) -> (u8, u8) {
-    let mut candidates: Vec<(u8, u8)> = crate::orders::NEIGHBOR_OFFSETS
-        .iter()
-        .filter_map(|&(dx, dy)| {
-            let (x, y) = (t.0 as i32 + dx, t.1 as i32 + dy);
-            if x >= 0 && y >= 0 && (x as usize) < 64 && (y as usize) < 64 {
-                Some((x as u8, y as u8))
-            } else {
-                None
-            }
-        })
-        .collect();
-    candidates.sort_by_key(|&tt| crate::map::tile_index(tt.0, tt.1));
-    candidates
-        .into_iter()
-        .find(|&tt| g.map.is_passable(tt.0, tt.1) && g.building_at(tt).is_none())
-        .unwrap_or(t)
 }
 
 /// March each side's combat units toward the enemy HQ at turn 6 and fight —

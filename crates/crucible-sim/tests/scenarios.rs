@@ -3,7 +3,7 @@
 
 use crucible_sim::{
     building_produces, building_stats, open_test_map, unit_stats, BuildingType, Command, EventKind,
-    Game, GameConfig, Player, Unit, UnitType,
+    Game, GameConfig, Player, ResourceType, Unit, UnitType,
 };
 
 fn open_game(starting_ore: i32) -> Game {
@@ -25,6 +25,7 @@ fn spawn_unit(g: &mut Game, p: Player, ut: UnitType, tile: (u8, u8)) -> u32 {
         hp: stats.hp,
         max_hp: stats.hp,
         mp: 0,
+        move_target: None,
         moved: false,
         acted: false,
     });
@@ -43,6 +44,7 @@ fn spawn_building(g: &mut Game, p: Player, bt: BuildingType, tile: (u8, u8)) -> 
         max_hp: stats.hp,
         queue: Vec::new(),
         progress: 0,
+        construction_progress: stats.build_time_turns,
         cooldown: 0,
         repaired_this_turn: false,
     });
@@ -52,9 +54,8 @@ fn spawn_building(g: &mut Game, p: Player, bt: BuildingType, tile: (u8, u8)) -> 
 #[test]
 fn refinery_income_flows_per_turn() {
     let mut g = open_game(1000);
-    // Place a refinery next to the natural ore pocket.
-    let ore_tile = nearest_ore(&g);
-    let refinery_tile = free_neighbor(&g, ore_tile);
+    // Place a refinery directly on the natural ore pocket.
+    let refinery_tile = nearest_ore(&g);
     let res = g.apply_commands(
         Player::P0,
         &[Command::PlaceBuilding {
@@ -78,11 +79,187 @@ fn refinery_income_flows_per_turn() {
         gained >= 3 * (crucible_sim::HQ_INCOME_PER_TURN + 1),
         "refinery produced no income over 3 turns: +{gained}"
     );
-    let mined = g
-        .events
-        .iter()
-        .any(|e| matches!(e.kind, EventKind::OreMined { .. }));
-    assert!(mined, "no OreMined event recorded");
+    let mined = g.events.iter().any(|e| {
+        matches!(
+            e.kind,
+            EventKind::ResourceMined {
+                resource: crucible_sim::ResourceType::Ore,
+                ..
+            }
+        )
+    });
+    assert!(mined, "no generic ore ResourceMined event recorded");
+}
+
+#[test]
+fn deposits_are_infinite_and_richness_controls_yield() {
+    let cfg = GameConfig {
+        starting_ore: 10_000,
+        timeout_turns: 0,
+        ..GameConfig::default()
+    };
+    let mut g = Game::new(open_test_map(19), cfg);
+    let tile = nearest_ore(&g);
+    let richness = g.map.resource_richness_at(tile.0, tile.1);
+    let resource_before = (
+        g.map.ore.clone(),
+        g.map.steel.clone(),
+        g.map.coal.clone(),
+        g.map.crystal.clone(),
+    );
+    let marker_before = g.map.resource_amount_at(tile.0, tile.1);
+    let result = g.apply_commands(
+        Player::P0,
+        &[Command::PlaceBuilding {
+            player: Player::P0,
+            btype: BuildingType::Refinery,
+            tile,
+        }],
+    );
+    assert_eq!(result, vec![Ok(())]);
+
+    let before = g.ore[Player::P0.index()];
+    for _ in 0..100 {
+        g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+        g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    }
+
+    // A century of extraction leaves both the authoritative metadata and the
+    // legacy marker arrays untouched.
+    assert_eq!(
+        resource_before,
+        (
+            g.map.ore.clone(),
+            g.map.steel.clone(),
+            g.map.coal.clone(),
+            g.map.crystal.clone()
+        )
+    );
+    assert_eq!(g.map.resource_amount_at(tile.0, tile.1), marker_before);
+    let expected_per_turn = crucible_sim::HQ_INCOME_PER_TURN
+        + crucible_sim::REFINERY_BASE_YIELD_PER_TURN * i32::from(richness);
+    let active_cycles = 100 - (building_stats(BuildingType::Refinery).build_time_turns - 1);
+    assert_eq!(
+        g.ore[Player::P0.index()] - before,
+        crucible_sim::HQ_INCOME_PER_TURN * 100
+            + crucible_sim::REFINERY_BASE_YIELD_PER_TURN * i32::from(richness) * active_cycles,
+        "infinite refinery did not keep producing at richness tier {richness}"
+    );
+    assert!(expected_per_turn > 0);
+    assert!(
+        g.events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ResourceMined { .. }))
+            .count()
+            >= active_cycles as usize
+    );
+}
+
+#[test]
+fn every_resource_type_is_infinite_and_richness_scaled() {
+    let cfg = GameConfig {
+        starting_ore: 10_000,
+        starting_steel: 10_000,
+        starting_coal: 10_000,
+        starting_crystal: 10_000,
+        timeout_turns: 0,
+        ..GameConfig::default()
+    };
+    let mut g = Game::new(open_test_map(23), cfg);
+    let tiles: Vec<(ResourceType, (u8, u8))> = ResourceType::ALL
+        .into_iter()
+        .map(|resource| (resource, find_resource(&g, resource)))
+        .collect();
+    let markers_before = (
+        g.map.ore.clone(),
+        g.map.steel.clone(),
+        g.map.coal.clone(),
+        g.map.crystal.clone(),
+    );
+
+    for &(_, tile) in &tiles {
+        let result = g.apply_commands(
+            Player::P0,
+            &[Command::PlaceBuilding {
+                player: Player::P0,
+                btype: BuildingType::Refinery,
+                tile,
+            }],
+        );
+        assert_eq!(result, vec![Ok(())]);
+    }
+
+    let expected_income = tiles.iter().fold(
+        crucible_sim::ResourceBundle::new(crucible_sim::HQ_INCOME_PER_TURN, 0, 0, 0),
+        |mut income, &(resource, tile)| {
+            let yield_amount =
+                g.refinery_yield(resource, g.map.resource_richness_at(tile.0, tile.1));
+            match resource {
+                ResourceType::Ore => income.ore += yield_amount,
+                ResourceType::Steel => income.steel += yield_amount,
+                ResourceType::Coal => income.coal += yield_amount,
+                ResourceType::Crystal => income.crystal += yield_amount,
+            }
+            income
+        },
+    );
+    let before = g.resources(Player::P0);
+
+    // Run 40 complete P0/P1 cycles. P0's refinery income is collected at
+    // each P1 end-turn when P0's next activation starts.
+    for _ in 0..40 {
+        g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+        g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    }
+
+    let after = g.resources(Player::P0);
+    let active_cycles = 40 - (building_stats(BuildingType::Refinery).build_time_turns - 1);
+    assert_eq!(
+        after.ore - before.ore,
+        crucible_sim::HQ_INCOME_PER_TURN * 40
+            + (expected_income.ore - crucible_sim::HQ_INCOME_PER_TURN) * active_cycles,
+        "ore output did not remain stable"
+    );
+    assert_eq!(
+        after.steel - before.steel,
+        expected_income.steel * active_cycles
+    );
+    assert_eq!(
+        after.coal - before.coal,
+        expected_income.coal * active_cycles
+    );
+    assert_eq!(
+        after.crystal - before.crystal,
+        expected_income.crystal * active_cycles
+    );
+    assert_eq!(
+        markers_before,
+        (
+            g.map.ore.clone(),
+            g.map.steel.clone(),
+            g.map.coal.clone(),
+            g.map.crystal.clone()
+        ),
+        "a refinery changed a static deposit marker"
+    );
+
+    let mut richness_levels = [false; 3];
+    for idx in 0..crucible_sim::map::MAP_TILES {
+        let tile = crucible_sim::map::tile_coords(idx);
+        if let Some(resource) = g.map.resource_at(tile.0, tile.1) {
+            let richness = g.map.resource_richness_at(tile.0, tile.1);
+            richness_levels[(richness - 1) as usize] = true;
+            assert!(g.refinery_yield(resource, richness) > 0);
+        }
+    }
+    assert!(
+        richness_levels[1] || richness_levels[2],
+        "map has no standard/rich deposits"
+    );
+    assert!(
+        g.refinery_yield(ResourceType::Ore, 3) > g.refinery_yield(ResourceType::Ore, 1),
+        "richness must increase yield"
+    );
 }
 
 #[test]
@@ -193,6 +370,26 @@ fn production_spawns_units_after_build_time() {
             utype: UnitType::Infantry,
         }],
     );
+    assert_eq!(
+        res,
+        vec![Err(crucible_sim::CommandError::BuildingUnderConstruction)]
+    );
+
+    // The site becomes operational only after its two-turn construction
+    // duration; only then may it accept a production order.
+    for _ in 0..2 {
+        g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+        g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    }
+    assert!(g.building(Player::P0, barracks).unwrap().is_operational());
+    let res = g.apply_commands(
+        Player::P0,
+        &[Command::TrainUnit {
+            player: Player::P0,
+            building: barracks,
+            utype: UnitType::Infantry,
+        }],
+    );
     assert_eq!(res, vec![Ok(())]);
     let before = g.units.len();
     // Infantry takes 1 turn: end both players' turns once.
@@ -254,6 +451,22 @@ fn auto_attack_and_end(g: &mut Game, p: Player) {
     let _ = g.apply_commands(p, &[Command::EndTurn { player: p }]);
 }
 
+fn find_resource(g: &Game, resource: ResourceType) -> (u8, u8) {
+    let from = g.hq(Player::P0).unwrap().tile;
+    let mut best: Option<(i32, usize, (u8, u8))> = None;
+    for idx in 0..crucible_sim::map::MAP_TILES {
+        let tile = crucible_sim::map::tile_coords(idx);
+        if g.map.resource_at(tile.0, tile.1) != Some(resource) {
+            continue;
+        }
+        let distance = crucible_sim::tiles::chebyshev(from.0, from.1, tile.0, tile.1);
+        if best.is_none_or(|(bd, bi, _)| distance < bd || (distance == bd && idx < bi)) {
+            best = Some((distance, idx, tile));
+        }
+    }
+    best.expect("generated map is missing a resource type").2
+}
+
 fn nearest_ore(g: &Game) -> (u8, u8) {
     let from = g.hq(Player::P0).unwrap().tile;
     let mut best: Option<(i32, (u8, u8))> = None;
@@ -268,32 +481,4 @@ fn nearest_ore(g: &Game) -> (u8, u8) {
         }
     }
     best.unwrap().1
-}
-
-fn free_neighbor(g: &Game, t: (u8, u8)) -> (u8, u8) {
-    let mut candidates: Vec<(u8, u8)> = [
-        (1i32, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (1, -1),
-        (-1, 1),
-        (-1, -1),
-    ]
-    .iter()
-    .filter_map(|&(dx, dy)| {
-        let (x, y) = (t.0 as i32 + dx, t.1 as i32 + dy);
-        if x >= 0 && y >= 0 && x < 64 && y < 64 {
-            Some((x as u8, y as u8))
-        } else {
-            None
-        }
-    })
-    .collect();
-    candidates.sort_by_key(|&tt| crucible_sim::map::tile_index(tt.0, tt.1));
-    candidates
-        .into_iter()
-        .find(|&tt| g.map.is_passable(tt.0, tt.1) && g.building_at(tt).is_none())
-        .unwrap_or(t)
 }

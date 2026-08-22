@@ -5,6 +5,10 @@ import type { ClientMsg, ServerMsg } from "./types";
 export class Net {
   private ws: WebSocket | null = null;
   private queue: ClientMsg[] = [];
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly HEARTBEAT_MS = 30000;
+  private static readonly TIMEOUT_MS = 90000;
 
   connect(onMessage: (msg: ServerMsg) => void, onClose: () => void): void {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -21,9 +25,22 @@ export class Net {
       if (this.ws !== ws) return;
       for (const m of this.queue) ws.send(JSON.stringify(m));
       this.queue = [];
+      // Heartbeat: send a no-op ping and set a timeout. If the server
+      // doesn't respond within TIMEOUT_MS, treat the connection as dead.
+      this.heartbeatTimer = setInterval(() => {
+        if (this.ws === ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: "ping" } as unknown as ClientMsg));
+          this.timeoutTimer ??= setTimeout(() => notifyClosed(), Net.TIMEOUT_MS);
+        }
+      }, Net.HEARTBEAT_MS);
     };
     ws.onmessage = (ev) => {
       if (this.ws !== ws) return;
+      // Any message from the server resets the timeout timer.
+      if (this.timeoutTimer) {
+        clearTimeout(this.timeoutTimer);
+        this.timeoutTimer = null;
+      }
       try {
         const msg = JSON.parse(ev.data as string) as ServerMsg;
         onMessage(msg);
@@ -47,6 +64,14 @@ export class Net {
   close(): void {
     const ws = this.ws;
     this.ws = null;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.timeoutTimer) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
     ws?.close();
   }
 }

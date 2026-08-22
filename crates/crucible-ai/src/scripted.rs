@@ -16,9 +16,11 @@
 //! `validate_command` not just against the pre-batch snapshot but against the
 //! state as it will be when its turn comes.
 
+use crucible_sim::map::MAP_SIZE;
 use crucible_sim::{
     building_stats, tech::prereqs_met, tech::tech_info, tech::TechId, tiles::chebyshev, unit_stats,
-    Building, BuildingType, Command, EntityId, Game, Player, UnitType,
+    Building, BuildingType, Command, EntityId, Game, Player, ResourceBundle, ResourceType,
+    UnitType,
 };
 
 use crate::bot::Bot;
@@ -32,15 +34,21 @@ use crate::bot::Bot;
 /// affordability and space against `pre-state minus plan`, not the snapshot.
 #[derive(Default)]
 pub(crate) struct Plan {
-    pub(crate) ore_spent: i32,
+    pub(crate) resources_spent: ResourceBundle,
     pub(crate) used_tiles: Vec<(u8, u8)>,
     /// Queue slots booked this batch, per building id.
     pub(crate) extra_queue: Vec<(EntityId, usize)>,
 }
 
 impl Plan {
-    fn ore_left(&self, g: &Game, p: Player) -> i32 {
-        g.ore[p.index()] - self.ore_spent
+    fn resources_left(&self, g: &Game, p: Player) -> ResourceBundle {
+        let current = g.resources(p);
+        ResourceBundle::new(
+            current.ore - self.resources_spent.ore,
+            current.steel - self.resources_spent.steel,
+            current.coal - self.resources_spent.coal,
+            current.crystal - self.resources_spent.crystal,
+        )
     }
 
     fn extra_queued(&self, id: EntityId) -> usize {
@@ -64,13 +72,15 @@ impl Plan {
 // ---------------------------------------------------------------------------
 
 fn own_building(g: &Game, p: Player, bt: BuildingType) -> Option<&Building> {
-    g.buildings.iter().find(|b| b.owner == p && b.btype == bt)
+    g.buildings
+        .iter()
+        .find(|b| b.owner == p && b.btype == bt && b.is_operational())
 }
 
 fn count_buildings(g: &Game, p: Player, bt: BuildingType) -> usize {
     g.buildings
         .iter()
-        .filter(|b| b.owner == p && b.btype == bt)
+        .filter(|b| b.owner == p && b.btype == bt && b.is_alive())
         .count()
 }
 
@@ -116,30 +126,20 @@ pub(crate) fn find_build_tile(
     let free = |t: (u8, u8)| !plan.used_tiles.contains(&t) && is_valid_build_tile(g, p, bt, t);
 
     if bt == BuildingType::Refinery || bt == BuildingType::CrystalRefinery {
-        // Refineries must touch their resource field: walk every ore (or
-        // crystal) tile nearest to `preferred` first and try its free
-        // 8-dir neighbors. Remote pockets are the expansion mechanic.
-        let fields = if bt == BuildingType::Refinery {
-            &g.map.ore
-        } else {
-            &g.map.crystal
-        };
+        // A generic refinery claims the exact deposit tile. Search all known
+        // resource kinds nearest to the preference point; the validator still
+        // decides whether the tile is legal and whether the tile is already
+        // occupied by another order in this batch.
         let mut fields: Vec<(usize, (u8, u8))> = (0..crucible_sim::map::MAP_TILES)
-            .filter(|&i| fields[i] > 0)
-            .map(|i| (i, crucible_sim::map::tile_coords(i)))
+            .filter_map(|idx| {
+                let t = crucible_sim::map::tile_coords(idx);
+                (g.map.resource_amount_at(t.0, t.1) > 0).then_some((idx, t))
+            })
             .collect();
         fields.sort_by_key(|&(idx, t)| (chebyshev(t.0, t.1, preferred.0, preferred.1), idx));
         for (_, field_tile) in fields {
-            for &(dx, dy) in crucible_sim::orders::NEIGHBOR_OFFSETS.iter() {
-                let x = field_tile.0 as i32 + dx;
-                let y = field_tile.1 as i32 + dy;
-                if !(0..64).contains(&x) || !(0..64).contains(&y) {
-                    continue;
-                }
-                let t = (x as u8, y as u8);
-                if free(t) {
-                    return Some(t);
-                }
+            if free(field_tile) {
+                return Some(field_tile);
             }
         }
         return None;
@@ -156,7 +156,7 @@ pub(crate) fn find_build_tile(
                 }
                 let x = preferred.0 as i32 + dx;
                 let y = preferred.1 as i32 + dy;
-                if !(0..64).contains(&x) || !(0..64).contains(&y) {
+                if !(0..MAP_SIZE as i32).contains(&x) || !(0..MAP_SIZE as i32).contains(&y) {
                     continue;
                 }
                 let t = (x as u8, y as u8);
@@ -182,12 +182,12 @@ fn place_if_missing(
     if count_buildings(g, p, bt) >= max {
         return None;
     }
-    let cost = building_stats(bt).cost;
-    if plan.ore_left(g, p) < cost {
+    let cost = building_stats(bt).resource_cost;
+    if !plan.resources_left(g, p).can_afford(cost) {
         return None;
     }
     let tile = find_build_tile(g, p, bt, preferred, plan)?;
-    plan.ore_spent += cost;
+    plan.resources_spent = plan.resources_spent.saturating_add(cost);
     plan.used_tiles.push(tile);
     Some(Command::PlaceBuilding {
         player: p,
@@ -204,6 +204,61 @@ fn place_if_missing(
 /// several trains in one turn cannot overfill a producer. Tech-gated units
 /// (artillery, mammoth) stay masked until a TechLab exists, mirroring the
 /// sim's validator exactly.
+/// Place a generic refinery on the nearest live deposit of `resource`.
+/// Resource refineries are the scripted bots' expansion step: unlike ordinary
+/// structures they do not need to sit beside the HQ, but the command still
+/// goes through the same server validator and batch resource ledger.
+fn place_refinery_for_resource(
+    g: &Game,
+    p: Player,
+    resource: ResourceType,
+    preferred: (u8, u8),
+    plan: &mut Plan,
+) -> Option<Command> {
+    if g.buildings.iter().any(|b| {
+        b.owner == p
+            && b.btype.is_refinery()
+            && g.map.resource_at(b.tile.0, b.tile.1) == Some(resource)
+    }) {
+        return None;
+    }
+    let cost = building_stats(BuildingType::Refinery).resource_cost;
+    if !plan.resources_left(g, p).can_afford(cost) {
+        return None;
+    }
+    let mut fields: Vec<(i32, usize, (u8, u8))> = (0..crucible_sim::map::MAP_TILES)
+        .filter_map(|idx| {
+            let t = crucible_sim::map::tile_coords(idx);
+            (g.map.resource_at(t.0, t.1) == Some(resource)
+                && g.map.resource_amount_at(t.0, t.1) > 0)
+                .then_some((chebyshev(t.0, t.1, preferred.0, preferred.1), idx, t))
+        })
+        .collect();
+    fields.sort_by_key(|&(distance, idx, _)| (distance, idx));
+    for (_, _, tile) in fields {
+        if plan.used_tiles.contains(&tile)
+            || !is_valid_build_tile(g, p, BuildingType::Refinery, tile)
+        {
+            continue;
+        }
+        // Do not claim a deposit already served by one of our refineries.
+        if g.buildings
+            .iter()
+            .any(|b| b.owner == p && b.btype.is_refinery() && b.tile == tile)
+        {
+            continue;
+        }
+        plan.resources_spent = plan.resources_spent.saturating_add(cost);
+        plan.used_tiles.push(tile);
+        return Some(Command::PlaceBuilding {
+            player: p,
+            btype: BuildingType::Refinery,
+            tile,
+        });
+    }
+    None
+}
+
 fn train_up_to(
     g: &Game,
     p: Player,
@@ -216,7 +271,7 @@ fn train_up_to(
         && !g
             .buildings
             .iter()
-            .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_alive())
+            .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
     {
         return None;
     }
@@ -241,14 +296,17 @@ fn train_up_to(
         .buildings
         .iter()
         .filter(|b| {
-            b.owner == p && b.btype == producer && b.is_alive() && load(b) < g.config.max_queue
+            b.owner == p
+                && b.btype == producer
+                && b.is_operational()
+                && load(b) < g.config.max_queue
         })
         .min_by_key(|b| (load(b), b.id))?;
-    let cost = unit_stats(ut).cost;
-    if plan.ore_left(g, p) < cost {
+    let cost = unit_stats(ut).resource_cost;
+    if !plan.resources_left(g, p).can_afford(cost) {
         return None;
     }
-    plan.ore_spent += cost;
+    plan.resources_spent = plan.resources_spent.saturating_add(cost);
     plan.book_queue(building.id);
     Some(Command::TrainUnit {
         player: p,
@@ -310,6 +368,46 @@ fn nearest_hittable_enemy(g: &Game, p: Player) -> Option<EntityId> {
 /// position until the next advance. This keeps armies flowing through each
 /// other instead of freezing into a mid-map grind — matches end by HQ
 /// destruction rather than timeout.
+/// Opening book: while the army is still assembling (three or fewer combat
+/// units), the nearest combat unit scouts the closest unclaimed resource
+/// pocket instead of sitting by the HQ. Vision of steel/coal/crystal sites
+/// lets the bot expand with information — it knows where the contested
+/// deposits are before it commits the march. Once the army grows past the
+/// scouting window every unit belongs to the push.
+pub(crate) fn opening_scout(g: &Game, p: Player) -> Vec<Command> {
+    let units = combat_unit_ids(g, p);
+    if units.is_empty() || units.len() > 3 {
+        return Vec::new();
+    }
+    let hq = g.hq(p).map(|b| b.tile).unwrap_or((8, 8));
+    let mut best: Option<(i32, (u8, u8))> = None;
+    for idx in 0..g.map.resource_kind.len() {
+        if g.map.resource_kind[idx].is_none() {
+            continue;
+        }
+        let (x, y) = crucible_sim::map::tile_coords(idx);
+        // A site is already secured when this player extracts it.
+        if g.buildings
+            .iter()
+            .any(|b| b.owner == p && b.is_alive() && b.tile == (x, y))
+        {
+            continue;
+        }
+        let d = chebyshev(x, y, hq.0, hq.1);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, (x, y)));
+        }
+    }
+    let Some((_, objective)) = best else {
+        return Vec::new();
+    };
+    vec![Command::MoveGroup {
+        player: p,
+        units,
+        waypoint: objective,
+    }]
+}
+
 pub(crate) fn army_orders(g: &Game, p: Player, objective: (u8, u8)) -> Vec<Command> {
     let units = combat_unit_ids(g, p);
     if units.is_empty() {
@@ -358,7 +456,7 @@ fn research_next(g: &Game, p: Player) -> Option<Command> {
         if r.has(t) || !prereqs_met(t, &r.researched) {
             continue;
         }
-        if tech_info(t).crystal_cost > g.crystal[p.index()] {
+        if tech_info(t).crystal_cost > g.resources(p).crystal {
             continue;
         }
         return Some(Command::StartResearch { player: p, tech: t });
@@ -378,18 +476,18 @@ fn toward_enemy(hq: (u8, u8), enemy: (u8, u8), dist: i32) -> (u8, u8) {
     let dx = (enemy.0 as i32 - hq.0 as i32).signum();
     let dy = (enemy.1 as i32 - hq.1 as i32).signum();
     (
-        (hq.0 as i32 + dx * dist).clamp(0, 63) as u8,
-        (hq.1 as i32 + dy * dist).clamp(0, 63) as u8,
+        (hq.0 as i32 + dx * dist).clamp(0, MAP_SIZE as i32 - 1) as u8,
+        (hq.1 as i32 + dy * dist).clamp(0, MAP_SIZE as i32 - 1) as u8,
     )
 }
 
 /// Symmetrically orient building offsets toward the quadrant's natural ore pocket.
 fn base_offset(hq: (u8, u8), dx: i32, dy: i32) -> (u8, u8) {
-    let sx = if hq.0 < 32 { dx } else { -dx };
-    let sy = if hq.1 < 32 { dy } else { -dy };
+    let sx = if hq.0 < (MAP_SIZE / 2) as u8 { dx } else { -dx };
+    let sy = if hq.1 < (MAP_SIZE / 2) as u8 { dy } else { -dy };
     (
-        (hq.0 as i32 + sx).clamp(0, 63) as u8,
-        (hq.1 as i32 + sy).clamp(0, 63) as u8,
+        (hq.0 as i32 + sx).clamp(0, MAP_SIZE as i32 - 1) as u8,
+        (hq.1 as i32 + sy).clamp(0, MAP_SIZE as i32 - 1) as u8,
     )
 }
 
@@ -584,21 +682,59 @@ impl Bot for MediumBot {
                 out.push(c);
             }
         }
+        // Capture the industrial deposits that make the separate stockpiles
+        // matter. Medium sacrifices a few early bodies to secure Steel and
+        // Coal, then converts those materials into a sustainable wave.
+        let mut steel_refinery_planned = g.buildings.iter().any(|b| {
+            b.owner == p
+                && b.btype.is_refinery()
+                && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Steel)
+        });
+        if g.turn > 8 {
+            if let Some(c) = place_refinery_for_resource(
+                g,
+                p,
+                ResourceType::Steel,
+                base_offset(hq, 6, 0),
+                &mut plan,
+            ) {
+                out.push(c);
+                steel_refinery_planned = true;
+            }
+        }
+        if g.turn > 22 {
+            if let Some(c) = place_refinery_for_resource(
+                g,
+                p,
+                ResourceType::Coal,
+                base_offset(hq, 10, 0),
+                &mut plan,
+            ) {
+                out.push(c);
+            }
+        }
+
         // The medium never researches: its identity is cheap continuous
         // pressure, and the wave needs every ore point as a body, not a tech.
         // (Hard is the tech pusher and owns the research tree.)
 
         // The wave: infantry bodies (cheap, 1-turn build) as the hammer,
         // tanks as the anvil once the infantry train is running.
-        if let Some(c) = train_up_to(
-            g,
-            p,
-            BuildingType::Barracks,
-            UnitType::Infantry,
-            10,
-            &mut plan,
-        ) {
-            out.push(c);
+        // Preserve the opening Steel reserve until the Steel refinery is
+        // secured. Without this guard the cheap infantry queue consumes the
+        // exact material needed to claim the next deposit and the rush stalls
+        // forever on its first three bodies.
+        if steel_refinery_planned {
+            if let Some(c) = train_up_to(
+                g,
+                p,
+                BuildingType::Barracks,
+                UnitType::Infantry,
+                10,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
         }
         // Artillery out-prioritizes tanks in the factory queue once the
         // TechLab is up: it is the siege tool that cracks a turtled base
@@ -695,8 +831,8 @@ impl Bot for HardBot {
         if let Some(c) = place_if_missing(
             g,
             p,
-            BuildingType::PowerPlant,
-            base_offset(hq, 0, -2),
+            BuildingType::Barracks,
+            base_offset(hq, 2, 2),
             1,
             &mut plan,
         ) {
@@ -705,39 +841,89 @@ impl Bot for HardBot {
         if let Some(c) = place_if_missing(
             g,
             p,
-            BuildingType::Barracks,
-            base_offset(hq, 2, 2),
+            BuildingType::PowerPlant,
+            base_offset(hq, 0, -2),
             1,
             &mut plan,
         ) {
             out.push(c);
         }
 
+        // Secure industrial deposits before the heavy queue consumes the
+        // opening reserve. The generic refinery works on Steel/Coal exactly
+        // as it does on Ore; this is what lets the hard bot sustain armor.
+        let mut steel_refinery_planned = g.buildings.iter().any(|b| {
+            b.owner == p
+                && b.btype.is_refinery()
+                && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Steel)
+        });
+        if g.turn > 10 {
+            if let Some(c) = place_refinery_for_resource(
+                g,
+                p,
+                ResourceType::Steel,
+                base_offset(hq, 6, 0),
+                &mut plan,
+            ) {
+                out.push(c);
+                steel_refinery_planned = true;
+            }
+        }
+        let mut coal_refinery_planned = g.buildings.iter().any(|b| {
+            b.owner == p
+                && b.btype.is_refinery()
+                && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Coal)
+        });
+        if g.turn > 24 {
+            if let Some(c) = place_refinery_for_resource(
+                g,
+                p,
+                ResourceType::Coal,
+                base_offset(hq, 10, 0),
+                &mut plan,
+            ) {
+                out.push(c);
+                coal_refinery_planned = true;
+            }
+        }
+
         // Early army: 8 infantry + 6 tanks. Once Rocket Propulsion lands,
         // a couple of rocket troopers (tech-gated in `train_up_to`) join the
         // barracks queue — they out-trade armor without diluting it.
-        if let Some(c) = train_up_to(
-            g,
-            p,
-            BuildingType::Barracks,
-            UnitType::Infantry,
-            8,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        if let Some(c) = train_up_to(
-            g,
-            p,
-            BuildingType::Barracks,
-            UnitType::RocketTrooper,
-            2,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 6, &mut plan) {
-            out.push(c);
+        // Do not let the cheap barracks queue starve the factory timing: the
+        // hard tier is defined by getting armor online, so hold infantry until
+        // the first factory exists. Within the armor phase, book the tank
+        // before the infantry so the mixed army cannot spend every small
+        // income tick on rifles and never reach its defining unit. The medium
+        // tier intentionally takes the opposite trade and floods infantry.
+        if steel_refinery_planned
+            && coal_refinery_planned
+            && own_building(g, p, BuildingType::Factory).is_some()
+        {
+            if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 6, &mut plan)
+            {
+                out.push(c);
+            }
+            if let Some(c) = train_up_to(
+                g,
+                p,
+                BuildingType::Barracks,
+                UnitType::Infantry,
+                8,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
+            if let Some(c) = train_up_to(
+                g,
+                p,
+                BuildingType::Barracks,
+                UnitType::RocketTrooper,
+                2,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
         }
 
         // One early turret to blunt the opening rush: hard must survive the
@@ -792,7 +978,7 @@ impl Bot for HardBot {
         // hard benchmark exercising the full tech tree.
         if own_building(g, p, BuildingType::TechLab).is_some() && g.turn > 45 {
             // Second PowerPlant once the bank allows (pays the coil's bill).
-            if g.ore[p.index()] >= 300 {
+            if g.can_afford(p, building_stats(BuildingType::PowerPlant).resource_cost) {
                 if let Some(c) = place_if_missing(
                     g,
                     p,
@@ -805,7 +991,7 @@ impl Bot for HardBot {
                 }
             }
             // Tesla Coil guard once the bank can absorb a 250 ore spend.
-            if g.ore[p.index()] >= 350 {
+            if g.can_afford(p, building_stats(BuildingType::TeslaCoil).resource_cost) {
                 if let Some(c) = place_if_missing(
                     g,
                     p,
@@ -820,7 +1006,7 @@ impl Bot for HardBot {
         }
         if own_building(g, p, BuildingType::TechLab).is_some()
             && g.turn > 80
-            && g.ore[p.index()] >= 300
+            && g.can_afford(p, unit_stats(UnitType::MammothTank).resource_cost)
         {
             if let Some(c) = train_up_to(
                 g,
@@ -834,19 +1020,71 @@ impl Bot for HardBot {
             }
         }
 
-        // Mass late-game armor: 14 tanks + 4 artillery.
-        if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 14, &mut plan) {
-            out.push(c);
+        // Mass late-game armor: 14 tanks + 4 artillery. Keep the material
+        // gate explicit so the reserve for the first industrial refinery is
+        // never consumed by an attractive-but-illegal training order.
+        if steel_refinery_planned && coal_refinery_planned {
+            // Anti-air reaction: if the enemy has visible aircraft, build
+            // SAM launchers and AA turrets. This makes the hard bot adapt
+            // to air-heavy strategies rather than being helpless.
+            let enemy_air = g
+                .units
+                .iter()
+                .filter(|u| u.owner == p.enemy() && unit_stats(u.utype).air)
+                .count();
+            if enemy_air > 0 {
+                let has_rockets = g.research[p.index()].has(TechId::RocketPropulsion);
+                if has_rockets {
+                    if let Some(c) = train_up_to(
+                        g,
+                        p,
+                        BuildingType::Factory,
+                        UnitType::SamLauncher,
+                        enemy_air.min(4),
+                        &mut plan,
+                    ) {
+                        out.push(c);
+                    }
+                }
+                if g.buildings
+                    .iter()
+                    .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
+                {
+                    if let Some(c) = place_if_missing(
+                        g,
+                        p,
+                        BuildingType::AATurret,
+                        toward_enemy(hq, enemy_hq_tile(g, p), 3),
+                        2,
+                        &mut plan,
+                    ) {
+                        out.push(c);
+                    }
+                }
+            }
+
+            if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 14, &mut plan)
+            {
+                out.push(c);
+            }
+            if let Some(c) = train_up_to(
+                g,
+                p,
+                BuildingType::Factory,
+                UnitType::Artillery,
+                4,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
         }
-        if let Some(c) = train_up_to(
-            g,
-            p,
-            BuildingType::Factory,
-            UnitType::Artillery,
-            4,
-            &mut plan,
-        ) {
-            out.push(c);
+
+        // Opening book: while the army is still assembling, the first units
+        // scout the nearest unclaimed resource pocket instead of idling by
+        // the HQ. This secures early vision of the contested deposits; the
+        // march takes over once the force reaches four units.
+        if g.turn <= 14 {
+            out.extend(opening_scout(g, p));
         }
 
         // Tactical push: advance or strike every turn once a minimum army is

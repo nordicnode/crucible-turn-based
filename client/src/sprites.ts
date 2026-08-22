@@ -39,10 +39,68 @@ export function getTeamPalette(owner: number, isStale: boolean = false): TeamPal
   return owner === 0 ? TEAM_BLUE : TEAM_RED;
 }
 
+/** Stable URLs for the small in-repository art pack. Canvas terrain keeps a
+ * procedural fallback, while HTML HUD/inspector surfaces can use crisp SVGs
+ * without waiting for an asset loader. */
+export function getAssetUrl(category: "terrain" | "resources" | "ui", key: string): string {
+  const normalized = key.toLowerCase() === "water" ? "lake" : key.toLowerCase();
+  return `/assets/${category}/${normalized}.svg`;
+}
+
 function tileHash(tx: number, ty: number): number {
   let h = (tx * 374761393 + ty * 668265263) ^ 0x5bf03635;
   h = (h ^ (h >> 13)) * 1274126143;
   return (h ^ (h >> 16)) >>> 0;
+}
+
+/** Deterministic micro-position within a tile for per-tile detail placement. */
+function detPos(h: number, i: number, span: number): number {
+  return ((h >>> (i * 7)) % Math.max(1, Math.floor(span)));
+}
+
+/** A filled circle, integer-snapped, deterministic per tile. */
+function pCircle(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  color: string,
+): void {
+  ctx.beginPath();
+  ctx.arc(Math.floor(cx) + 0.5, Math.floor(cy) + 0.5, Math.max(0.5, r), 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+/** A filled triangle (peak/ridge facet), integer-snapped. */
+function pTri(
+  ctx: CanvasRenderingContext2D,
+  x1: number, y1: number,
+  x2: number, y2: number,
+  x3: number, y3: number,
+  color: string,
+): void {
+  ctx.beginPath();
+  ctx.moveTo(Math.floor(x1) + 0.5, Math.floor(y1) + 0.5);
+  ctx.lineTo(Math.floor(x2) + 0.5, Math.floor(y2) + 0.5);
+  ctx.lineTo(Math.floor(x3) + 0.5, Math.floor(y3) + 0.5);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+/** A short grass tuft: two blades with a highlight. */
+function pGrassTuft(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number,
+  w: number, h: number,
+  light: string,
+  dark: string,
+): void {
+  const bw = Math.max(1, Math.floor(w));
+  const bh = Math.max(2, Math.floor(h));
+  pRect(ctx, x, y, bw, bh, dark);
+  pRect(ctx, x + bw + Math.max(1, bw / 2), y, bw, Math.max(2, bh - 1), light);
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +145,8 @@ function pHazard(ctx: CanvasRenderingContext2D, x: number, y: number, w: number,
 }
 
 // ---------------------------------------------------------------------------
-// Terrain Sprites (Tactical C&C Pixel Soil & Fractured Rock Outcroppings)
+// Terrain Sprites (Civ-style readable biomes: organic shapes, consistent
+// north-west light, distinct per-tile texture)
 // ---------------------------------------------------------------------------
 
 export function drawPassableTile(
@@ -100,37 +159,72 @@ export function drawPassableTile(
   isExploredOnly: boolean,
 ): void {
   const h = tileHash(tx, ty);
-  const variant = h % 4;
 
   if (isExploredOnly) {
-    pRect(ctx, px, py, size, size, "#090d0b");
+    pRect(ctx, px, py, size, size, "#09100c");
     pStroke(ctx, px, py, size, size, "#040705");
     return;
   }
 
-  // Gritty tactical C&C earth palette
-  const groundBases = ["#1b2d1d", "#1e3221", "#18281a", "#213624"];
-  pRect(ctx, px, py, size, size, groundBases[variant]);
+  // Multi-tone lush grassland with rich micro-texture
+  const bases = ["#4e7a36", "#56843c", "#477030", "#5c8c42"];
+  pRect(ctx, px, py, size, size, bases[h % 4]);
+  // Sunlit north-west corner, shadowed south-east corner for gentle elevation
+  pRect(ctx, px, py, size, Math.max(1, size * 0.12), "rgba(255,255,255,0.12)");
+  pRect(ctx, px, py, Math.max(1, size * 0.12), size, "rgba(255,255,255,0.08)");
+  pRect(ctx, px, py + size - Math.max(1, size * 0.12), size, Math.max(1, size * 0.12), "rgba(0,0,0,0.12)");
+  pRect(ctx, px + size - Math.max(1, size * 0.12), py, Math.max(1, size * 0.12), size, "rgba(0,0,0,0.08)");
+  pStroke(ctx, px, py, size, size, "rgba(24,46,18,0.30)");
 
-  // Subtle 1px grid seam
-  pStroke(ctx, px, py, size, size, "#101d12");
+  if (size >= 7) {
+    // Multi-blade grass tufts scattered deterministically
+    const tuftCount = 2 + (h % 3);
+    for (let i = 0; i < tuftCount; i++) {
+      const gx = px + detPos(h, i * 2, size - 8);
+      const gy = py + detPos(h, i * 2 + 3, size - 6);
+      pGrassTuft(ctx, gx, gy, Math.max(1, size * 0.05), Math.max(2, size * 0.14), "#8ec460", "#385223");
+    }
 
-  // Surface texture details (cracked soil, gravel clusters, tech seams)
-  if (size >= 8) {
-    if (variant === 1) {
-      pRect(ctx, px + size * 0.2, py + size * 0.35, size * 0.25, 1, "#2e4a32");
-      pRect(ctx, px + size * 0.5, py + size * 0.65, size * 0.3, 1, "#2e4a32");
-    } else if (variant === 2) {
-      pRect(ctx, px + size * 0.3, py + size * 0.4, 2, 2, "#0d180f");
-      pRect(ctx, px + size * 0.7, py + size * 0.6, 2, 2, "#3b5c40");
-      pRect(ctx, px + size * 0.75, py + size * 0.65, 1, 1, "#4d7853");
-    } else if (variant === 3) {
-      pDither(ctx, px + size * 0.25, py + size * 0.2, size * 0.5, size * 0.5, groundBases[variant], "#253e2a");
+    // Deterministic colorful wildflowers & clover
+    const flowerType = h % 4;
+    const fx1 = px + detPos(h, 5, size - 4);
+    const fy1 = py + detPos(h, 6, size - 4);
+    const fx2 = px + detPos(h, 7, size - 4);
+    const fy2 = py + detPos(h, 8, size - 4);
+
+    if (flowerType === 0) {
+      // Golden buttercups
+      pRect(ctx, fx1, fy1, 2, 2, "#facc15");
+      pRect(ctx, fx1, fy1 + 1, 1, 1, "#ca8a04");
+      pRect(ctx, fx2, fy2, 1, 1, "#fef08a");
+    } else if (flowerType === 1) {
+      // Crimson field poppies
+      pRect(ctx, fx1, fy1, 2, 2, "#ef4444");
+      pRect(ctx, fx1 + 1, fy1, 1, 1, "#fca5a5");
+      pRect(ctx, fx2, fy2, 1, 1, "#dc2626");
+    } else if (flowerType === 2) {
+      // Soft lavender clover blossoms
+      pRect(ctx, fx1, fy1, 2, 2, "#c084fc");
+      pRect(ctx, fx1, fy1, 1, 1, "#e9d5ff");
+      pRect(ctx, fx2, fy2, 1, 1, "#a855f7");
+    } else {
+      // White meadow daisies with yellow eye
+      pRect(ctx, fx1, fy1, 2, 2, "#f8fafc");
+      pRect(ctx, fx1 + 1, fy1, 1, 1, "#eab308");
+      pRect(ctx, fx2, fy2, 1, 1, "#f1f5f9");
+    }
+
+    // Small earth pebble
+    if (size >= 12 && h % 3 === 0) {
+      const rx = px + size * 0.65;
+      const ry = py + size * 0.75;
+      pRect(ctx, rx, ry, 2, 2, "#8b7e66");
+      pRect(ctx, rx, ry + 1, 2, 1, "#544c3c");
     }
   }
 }
 
-/** Forest: dense canopy over dark soil (+25% defense in the sim). */
+/** Forest: volumetric layered canopies, visible tree trunks, deep shadowed floor. */
 export function drawForestTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
@@ -143,30 +237,59 @@ export function drawForestTile(
   const h = tileHash(tx, ty);
 
   if (isExploredOnly) {
-    pRect(ctx, px, py, size, size, "#0a0f0d");
-    pStroke(ctx, px, py, size, size, "#040705");
+    pRect(ctx, px, py, size, size, "#07130a");
+    pStroke(ctx, px, py, size, size, "#030804");
     return;
   }
 
-  // Dark mossy earth base
-  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#14241a" : "#172b1f");
-  pStroke(ctx, px, py, size, size, "#0d1a12");
+  // Forest floor base: rich loamy understory
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#223518" : "#283c1c");
+  pStroke(ctx, px, py, size, size, "rgba(12,30,14,0.45)");
 
-  // Canopy blobs
-  const blob = h % 3;
-  if (size >= 8) {
-    const c1 = "#1d3a24", c2 = "#24502e";
-    pRect(ctx, px + size * 0.12, py + size * 0.18, size * 0.3, size * 0.26, c1);
-    pRect(ctx, px + size * 0.38, py + size * 0.42, size * 0.32, size * 0.28, c2);
-    pRect(ctx, px + size * 0.55, py + size * 0.1, size * 0.28, size * 0.24, c2);
-    pRect(ctx, px + size * 0.6, py + size * 0.5, size * 0.26, size * 0.3, c1);
-    if (blob === 0) {
-      pRect(ctx, px + size * 0.28, py + size * 0.2, size * 0.18, size * 0.14, "#2f6a3c");
+  if (size >= 7) {
+    // Deep ground shadows beneath trees
+    pRect(ctx, px + size * 0.15, py + size * 0.62, size * 0.35, size * 0.15, "rgba(10, 20, 10, 0.55)");
+    pRect(ctx, px + size * 0.52, py + size * 0.68, size * 0.38, size * 0.16, "rgba(10, 20, 10, 0.55)");
+
+    // Tree trunks with root flares
+    pRect(ctx, px + size * 0.28, py + size * 0.48, Math.max(2, size * 0.06), size * 0.22, "#4a3016");
+    pRect(ctx, px + size * 0.26, py + size * 0.66, Math.max(3, size * 0.10), Math.max(1, size * 0.04), "#3a2510");
+    pRect(ctx, px + size * 0.66, py + size * 0.52, Math.max(2, size * 0.06), size * 0.24, "#54381a");
+    pRect(ctx, px + size * 0.64, py + size * 0.72, Math.max(3, size * 0.10), Math.max(1, size * 0.04), "#3a2510");
+
+    // 5 Layered tree crowns with rich 3D shading
+    const trees = [
+      [0.26, 0.24, 0.24],
+      [0.68, 0.20, 0.26],
+      [0.44, 0.44, 0.22],
+      [0.20, 0.52, 0.25],
+      [0.72, 0.54, 0.28],
+    ];
+
+    for (let i = 0; i < trees.length; i++) {
+      const [fx, fy, fr] = trees[(h + i) % trees.length];
+      const cxp = px + size * (fx + detPos(h, i + 1, 6) / 100);
+      const cyp = py + size * (fy + detPos(h, i + 4, 6) / 100);
+      const r = size * fr;
+
+      // Dark understory shadow
+      pCircle(ctx, cxp, cyp + 1, r, "#153818");
+      // Mid-tone foliage body
+      pCircle(ctx, cxp, cyp, r * 0.9, i % 2 === 0 ? "#245c2a" : "#2f6e35");
+      // Sunlit NW canopy crown highlight
+      pCircle(ctx, cxp - r * 0.28, cyp - r * 0.32, r * 0.58, "#4fa456");
+      // Bright specular foliage glint
+      pCircle(ctx, cxp - r * 0.36, cyp - r * 0.40, r * 0.28, "#6ec876");
+    }
+
+    // Occasional forest blossom / pinecone fleck
+    if (size >= 12 && h % 3 === 0) {
+      pRect(ctx, px + size * 0.55, py + size * 0.32, 1, 1, "#fde047");
     }
   }
 }
 
-/** Hills: rugged tan earthworks with ridgelines (+30% defense in the sim). */
+/** Hills: rich rolling contours with sunlit rocky ridges, shale shelves, and scree. */
 export function drawHillsTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
@@ -179,33 +302,53 @@ export function drawHillsTile(
   const h = tileHash(tx, ty);
 
   if (isExploredOnly) {
-    pRect(ctx, px, py, size, size, "#100e0a");
-    pStroke(ctx, px, py, size, size, "#070604");
+    pRect(ctx, px, py, size, size, "#120e08");
+    pStroke(ctx, px, py, size, size, "#070503");
     return;
   }
 
-  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#2b261c" : "#312b1f");
-  pStroke(ctx, px, py, size, size, "#1c1810");
+  // Warm ochre earth base
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#7b6b42" : "#847448");
+  pStroke(ctx, px, py, size, size, "rgba(56,46,24,0.4)");
 
-  // Contour ridgelines
-  const fv = h % 3;
-  if (size >= 8) {
-    pRect(ctx, px + 2, py + size * 0.55, size * 0.6, 2, "#4a4030");
-    pRect(ctx, px + size * 0.1, py + size * 0.3, size * 0.5, 2, "#554a36");
-    pRect(ctx, px + size * 0.25, py + size * 0.1, size * 0.4, 2, "#63573f");
-    if (fv === 0) {
-      pRect(ctx, px + size * 0.7, py + size * 0.65, size * 0.25, 2, "#4a4030");
-    } else if (fv === 1) {
-      pRect(ctx, px + size * 0.08, py + size * 0.75, size * 0.3, 2, "#3d3527");
-    }
-    // Loose scree
-    pRect(ctx, px + size * 0.45, py + size * 0.22, 2, 2, "#6b5d42");
-    pRect(ctx, px + size * 0.6, py + size * 0.6, 2, 2, "#6b5d42");
+  if (size >= 7) {
+    // 1. Faceted 3D hill contour slopes
+    // Lit NW slope face (warm golden light)
+    pTri(ctx, px, py + size, px + size * 0.36, py + size * 0.22, px + size * 0.74, py + size, "#a8975e");
+    pTri(ctx, px, py, px + size * 0.36, py + size * 0.22, px + size * 0.74, py, "#9e8d56");
+    // Deep shaded SE slope hollows
+    pTri(ctx, px + size * 0.36, py + size * 0.22, px + size, py + size * 0.64, px + size * 0.74, py + size, "#504222");
+    pTri(ctx, px + size * 0.36, py + size * 0.22, px + size, py + size * 0.64, px + size, py, "#5b4c27");
+
+    // 2. Crest ridge highlight line
+    ctx.strokeStyle = "#c8b77c";
+    ctx.lineWidth = Math.max(1, size * 0.05);
+    ctx.beginPath();
+    ctx.moveTo(px + size * 0.10, py + size * 0.54);
+    ctx.quadraticCurveTo(px + size * 0.36, py + size * 0.28, px + size * 0.62, py + size * 0.58);
+    ctx.stroke();
+
+    // 3. Secondary contour terrace
+    ctx.strokeStyle = "#493b1e";
+    ctx.lineWidth = Math.max(1, size * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(px + size * 0.50, py + size * 0.78);
+    ctx.quadraticCurveTo(px + size * 0.74, py + size * 0.62, px + size * 0.94, py + size * 0.76);
+    ctx.stroke();
+
+    // 4. Rocky shale shelves and scree stones
+    pRect(ctx, px + size * 0.48, py + size * 0.16, Math.max(2, size * 0.06), Math.max(2, size * 0.06), "#d6c796");
+    pRect(ctx, px + size * 0.50, py + size * 0.20, Math.max(2, size * 0.06), 1, "#493b1e");
+    pRect(ctx, px + size * 0.70, py + size * 0.48, Math.max(2, size * 0.06), Math.max(2, size * 0.06), "#3f3218");
+    pRect(ctx, px + size * 0.20, py + size * 0.76, Math.max(2, size * 0.08), 2, "#b8a674");
+
+    // Highland alpine grass tuft
+    pGrassTuft(ctx, px + size * 0.12, py + size * 0.32, Math.max(1, size * 0.04), Math.max(2, size * 0.10), "#728c46", "#3f4e24");
   }
 }
 
-/** Water: deep inland lake, impassable to every unit. */
-export function drawWaterTile(
+/** Desert: sweeping golden barchan dunes with sun-bleached crests and wind ripples. */
+export function drawDesertTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
   ty: number,
@@ -217,25 +360,303 @@ export function drawWaterTile(
   const h = tileHash(tx, ty);
 
   if (isExploredOnly) {
-    pRect(ctx, px, py, size, size, "#080e13");
-    pStroke(ctx, px, py, size, size, "#030609");
+    pRect(ctx, px, py, size, size, "#161108");
+    pStroke(ctx, px, py, size, size, "#0a0703");
     return;
   }
 
-  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#0d2b40" : "#0f3148");
-  pStroke(ctx, px, py, size, size, "#081d2c");
+  // Warm golden sand base
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#d6ae5c" : "#deb664");
+  pRect(ctx, px, py, size, Math.max(1, size * 0.12), "rgba(255,255,255,0.18)");
+  pStroke(ctx, px, py, size, size, "rgba(138,104,48,0.40)");
 
-  // Ripples
-  const fv = h % 3;
-  if (size >= 8) {
-    pRect(ctx, px + size * 0.15, py + size * 0.35, size * 0.4, 1.5, "#1c5878");
-    pRect(ctx, px + size * 0.45, py + size * 0.62, size * 0.35, 1.5, "#174a66");
-    if (fv === 0) {
-      pRect(ctx, px + size * 0.6, py + size * 0.25, size * 0.25, 1.5, "#1c5878");
+  if (size >= 7) {
+    // 1. Sweeping wind-carved dune crest (sun-bleached gold)
+    ctx.strokeStyle = "#f6e19c";
+    ctx.lineWidth = Math.max(1.5, size * 0.06);
+    ctx.beginPath();
+    ctx.moveTo(px + size * 0.04, py + size * (0.28 + detPos(h, 0, 6) / 100));
+    ctx.quadraticCurveTo(
+      px + size * 0.44,
+      py + size * (0.12 + detPos(h, 1, 6) / 100),
+      px + size * 0.96,
+      py + size * (0.30 + detPos(h, 2, 6) / 100),
+    );
+    ctx.stroke();
+
+    // 2. Shaded dune slipface trough below
+    ctx.strokeStyle = "#9c772e";
+    ctx.lineWidth = Math.max(1, size * 0.045);
+    ctx.beginPath();
+    ctx.moveTo(px + size * 0.04, py + size * 0.64);
+    ctx.quadraticCurveTo(px + size * 0.50, py + size * 0.78, px + size * 0.96, py + size * 0.64);
+    ctx.stroke();
+
+    // 3. Parallel wind ripple striations
+    const ry = py + size * (0.42 + detPos(h, 3, 10) / 100);
+    pRect(ctx, px + size * 0.12, ry, size * 0.20, 1, "#c79f4c");
+    pRect(ctx, px + size * 0.40, ry + Math.max(2, size * 0.06), size * 0.18, 1, "#c79f4c");
+    pRect(ctx, px + size * 0.66, ry + Math.max(1, size * 0.03), size * 0.24, 1, "#c79f4c");
+
+    // 4. Weathered desert stone nodule with hard shadow
+    const rx = px + size * 0.74;
+    const stoneY = py + size * 0.26;
+    pRect(ctx, rx, stoneY, Math.max(2, size * 0.08), Math.max(2, size * 0.08), "#fdf2cf");
+    pRect(ctx, rx, stoneY + Math.max(2, size * 0.07), Math.max(2, size * 0.08), 1, "#846220");
+    pRect(ctx, rx + Math.max(2, size * 0.08), stoneY + 1, Math.max(1, size * 0.04), Math.max(1, size * 0.06), "#523c14");
+  }
+}
+
+/** Swamp: murky peat wetland with iridescent brackish pools, water lilies, and cattails. */
+export function drawSwampTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#081008");
+    pStroke(ctx, px, py, size, size, "#040804");
+    return;
+  }
+
+  // Dark mossy peat base
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#3b4f2c" : "#435a32");
+  pStroke(ctx, px, py, size, size, "rgba(22,40,18,0.45)");
+
+  if (size >= 7) {
+    // 1. Iridescent brackish water pools
+    // Pool 1 (North-West)
+    pCircle(ctx, px + size * 0.32, py + size * 0.32, size * 0.18, "#1e4e46");
+    pCircle(ctx, px + size * 0.34, py + size * 0.30, size * 0.10, "#2f786d");
+    pCircle(ctx, px + size * 0.36, py + size * 0.28, size * 0.04, "#52b8a6");
+
+    // Pool 2 (South-East)
+    pCircle(ctx, px + size * 0.68, py + size * 0.64, size * 0.22, "#1a4640");
+    pCircle(ctx, px + size * 0.70, py + size * 0.60, size * 0.12, "#2b6e64");
+    pCircle(ctx, px + size * 0.72, py + size * 0.58, size * 0.05, "#48a898");
+
+    // 2. Floating water lily pads
+    pCircle(ctx, px + size * 0.28, py + size * 0.34, Math.max(1.5, size * 0.05), "#4f7832");
+    pCircle(ctx, px + size * 0.74, py + size * 0.66, Math.max(1.5, size * 0.05), "#4f7832");
+    pRect(ctx, px + size * 0.28, py + size * 0.33, 1, 1, "#f472b6"); // pink lotus flower
+
+    // 3. Dense reed and cattail cluster
+    const rx = px + size * (0.14 + detPos(h, 0, 10) / 100);
+    const ry = py + size * 0.52;
+    const rw = Math.max(1, size * 0.045);
+
+    // Stalks
+    pRect(ctx, rx, ry, rw, size * 0.34, "#88903c");
+    pRect(ctx, rx + rw * 3, ry - size * 0.08, rw, size * 0.42, "#9ea644");
+    pRect(ctx, rx + rw * 6, ry + size * 0.04, rw, size * 0.30, "#767c32");
+
+    // Fuzzy dark brown cattail heads
+    pRect(ctx, rx - 0.5, ry + 1, rw + 1, size * 0.12, "#523e16");
+    pRect(ctx, rx + rw * 3 - 0.5, ry - size * 0.07, rw + 1, size * 0.14, "#59421b");
+    pRect(ctx, rx + rw * 6 - 0.5, ry + size * 0.05, rw + 1, size * 0.11, "#483612");
+    // Fuzzy head tips
+    pRect(ctx, rx, ry + 1, rw, 1, "#7a5d28");
+    pRect(ctx, rx + rw * 3, ry - size * 0.07, rw, 1, "#7a5d28");
+
+    // Wet mud patch
+    pRect(ctx, px + size * 0.50, py + size * 0.16, size * 0.26, Math.max(1, size * 0.05), "#28381e");
+  }
+}
+
+/** Water: deep rich ocean/lake water filling the FULL tile with dynamic waves and sun glints. */
+export function drawWaterTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+  tick: number = 0,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#06121b");
+    pStroke(ctx, px, py, size, size, "#03090e");
+    return;
+  }
+
+  // Full-tile water base: rich layered ocean/lake blue depth
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#205d8a" : "#246494");
+  // Deep water trench / subsurface depth at lower half
+  pRect(ctx, px, py + size * 0.50, size, size * 0.50, "#164468");
+  pRect(ctx, px, py + size * 0.78, size, size * 0.22, "#103350");
+  // Sunlit surface bevel at top/left
+  pRect(ctx, px, py, size, Math.max(1, size * 0.08), "rgba(142, 226, 255, 0.22)");
+  pStroke(ctx, px, py, size, size, "rgba(12,38,60,0.40)");
+
+  if (size >= 7) {
+    // 1. Organic wave crests
+    ctx.strokeStyle = "rgba(110, 196, 240, 0.85)";
+    ctx.lineWidth = Math.max(1, size * 0.045);
+    ctx.beginPath();
+    ctx.arc(px + size * 0.28, py + size * 0.32, size * 0.18, Math.PI * 0.15, Math.PI * 0.85);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(70, 150, 198, 0.75)";
+    ctx.beginPath();
+    ctx.arc(px + size * 0.72, py + size * 0.56, size * 0.22, Math.PI * 1.15, Math.PI * 1.85);
+    ctx.stroke();
+
+    // 2. Animated horizontal drift ripples
+    const drift = ((Math.floor(tick * 0.8) + h) % Math.max(4, Math.floor(size * 0.8))) as number;
+    pRect(ctx, px + size * 0.36 + (drift % 6) - 3, py + size * 0.22, size * 0.22, 1, "#5cb8e8");
+    pRect(ctx, px + size * 0.20 + ((drift + 4) % 6) - 3, py + size * 0.68, size * 0.26, 1, "#4090c4");
+
+    // 3. Specular sunlight sparkle glints
+    const glintPhase = Math.sin(tick * 0.18 + h) > 0.1;
+    if (glintPhase) {
+      pRect(ctx, px + size * 0.46, py + size * 0.38, 2, 2, "#ffffff");
+      pRect(ctx, px + size * 0.45, py + size * 0.39, 4, 1, "#b8edff");
+      pRect(ctx, px + size * 0.18, py + size * 0.58, 2, 2, "#dcf5ff");
+    } else {
+      pRect(ctx, px + size * 0.68, py + size * 0.28, 2, 2, "#ffffff");
+      pRect(ctx, px + size * 0.32, py + size * 0.76, 2, 2, "#dcf5ff");
     }
-    // Glint
-    pRect(ctx, px + size * 0.3, py + size * 0.3, 2, 2, "#2f7ea6");
-    pRect(ctx, px + size * 0.55, py + size * 0.55, 2, 2, "#2f7ea6");
+  }
+}
+
+/** River: dynamic flowing river filling the FULL tile with rushing currents and white-water drift. */
+export function drawRiverTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+  tick: number = 0,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#06151f");
+    pStroke(ctx, px, py, size, size, "#030a0f");
+    return;
+  }
+
+  // Full-tile river water: rushing vibrant cerulean water
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#25749c" : "#2b7ea6");
+  // Deep center current channel
+  pRect(ctx, px, py + size * 0.22, size, size * 0.56, "#1d6286");
+  // Fast flow mid-stream
+  pRect(ctx, px, py + size * 0.34, size, size * 0.32, "#2f8dbd");
+  // Sunlit surface bevel
+  pRect(ctx, px, py, size, Math.max(1, size * 0.08), "rgba(164, 235, 255, 0.28)");
+  pStroke(ctx, px, py, size, size, "rgba(14,48,70,0.40)");
+
+  if (size >= 7) {
+    // 1. Dynamic white-water current flow ribbons drifting with tick
+    const flow1 = ((Math.floor(tick * 1.5) + (h % 17)) % Math.max(4, Math.floor(size))) as number;
+    const flow2 = ((Math.floor(tick * 1.2) + ((h >> 4) % 23)) % Math.max(4, Math.floor(size))) as number;
+
+    // Fast center stream ribbon
+    pRect(ctx, px + flow1, py + size * 0.36, Math.max(4, size * 0.30), Math.max(1, size * 0.05), "#dcf5ff");
+    pRect(ctx, px + ((flow1 + size * 0.45) % size), py + size * 0.44, Math.max(3, size * 0.22), Math.max(1, size * 0.04), "#a4e5ff");
+    // Secondary flow stream
+    pRect(ctx, px + flow2, py + size * 0.58, Math.max(3, size * 0.24), Math.max(1, size * 0.04), "#6acbf7");
+    pRect(ctx, px + ((flow2 + size * 0.55) % size), py + size * 0.24, Math.max(3, size * 0.20), Math.max(1, size * 0.04), "#50bceb");
+
+    // 2. Submerged riverbed stones peeking through shallow edges
+    const stoneX = px + size * 0.16;
+    const stoneY = py + size * 0.72;
+    pRect(ctx, stoneX, stoneY, Math.max(2, size * 0.08), Math.max(2, size * 0.06), "#2a4232");
+    pRect(ctx, stoneX, stoneY, Math.max(2, size * 0.08), 1, "#4e6e58");
+
+    // 3. Specular sunlight sparkle
+    if (Math.sin(tick * 0.25 + h * 0.5) > 0.2) {
+      pRect(ctx, px + size * 0.62, py + size * 0.30, 2, 2, "#ffffff");
+      pRect(ctx, px + size * 0.28, py + size * 0.50, 2, 2, "#ffffff");
+    }
+  }
+}
+
+/** Mountain: dramatic 3D alpine peaks with sharp ridges, lit rock faces, snow caps, and scree. */
+export function drawMountainTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  px: number,
+  py: number,
+  size: number,
+  isExploredOnly: boolean,
+): void {
+  const h = tileHash(tx, ty);
+
+  if (isExploredOnly) {
+    pRect(ctx, px, py, size, size, "#080d12");
+    pStroke(ctx, px, py, size, size, "#040608");
+    return;
+  }
+
+  // Base mountain bedrock
+  pRect(ctx, px, py, size, size, h % 2 === 0 ? "#525c68" : "#5a6673");
+  pStroke(ctx, px, py, size, size, "rgba(28,36,44,0.5)");
+
+  if (size >= 7) {
+    // 1. Primary Peak: Apex coordinates
+    const apexX = px + size * (0.48 + detPos(h, 0, 8) / 100);
+    const apexY = py + size * 0.08;
+
+    // Lit NW granite face (bright mountain light)
+    pTri(ctx, px + size * 0.12, py + size * 0.94, apexX, apexY, px + size * 0.52, py + size * 0.94, "#7e8c9c");
+    // Deep SE precipice shadow face
+    pTri(ctx, px + size * 0.52, py + size * 0.94, apexX, apexY, px + size * 0.88, py + size * 0.94, "#323a44");
+
+    // Ridge crest highlight line
+    ctx.strokeStyle = "#9db0c4";
+    ctx.lineWidth = Math.max(1, size * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(apexX, apexY);
+    ctx.lineTo(px + size * 0.52, py + size * 0.94);
+    ctx.stroke();
+
+    // 2. Pure snow and ice cap on primary peak
+    pTri(
+      ctx,
+      apexX - size * 0.12,
+      apexY + size * 0.20,
+      apexX,
+      apexY,
+      apexX + size * 0.12,
+      apexY + size * 0.20,
+      "#edf5fb",
+    );
+    // Glacial shadow facet on snow
+    pTri(
+      ctx,
+      apexX,
+      apexY,
+      apexX,
+      apexY + size * 0.20,
+      apexX + size * 0.12,
+      apexY + size * 0.20,
+      "#b4d4e8",
+    );
+
+    // 3. Secondary companion peak
+    const secApexX = px + size * (0.84 + detPos(h, 2, 6) / 100);
+    const secApexY = py + size * 0.34;
+    pTri(ctx, px + size * 0.70, py + size * 0.94, secApexX, secApexY, px + size * 0.98, py + size * 0.94, "#687480");
+    pTri(ctx, secApexX - size * 0.06, secApexY + size * 0.12, secApexX, secApexY, secApexX + size * 0.06, secApexY + size * 0.12, "#edf5fb");
+
+    // 4. Shadowed base footing & talus scree field
+    pRect(ctx, px, py + size * 0.88, size, size * 0.12, "#252c34");
+    pRect(ctx, px + size * 0.22, py + size * 0.74, 2, 2, "#9ab0c4");
+    pRect(ctx, px + size * 0.64, py + size * 0.82, 2, 2, "#36404c");
+    pRect(ctx, px + size * 0.40, py + size * 0.86, 2, 2, "#8898a8");
   }
 }
 
@@ -298,7 +719,7 @@ export function drawOreDeposit(
 ): void {
   const cx = px + size * 0.5;
   const cy = py + size * 0.5;
-  const scale = Math.min(1.0, Math.max(0.5, amount / 500));
+  const scale = Math.min(1.0, Math.max(0.5, amount / 1500));
   const s = size * 0.22 * scale;
   const seed = (Math.floor(px * 23 + py * 41)) % 100;
 
@@ -381,7 +802,7 @@ export function drawCrystalDeposit(
 ): void {
   const cx = px + size * 0.5;
   const cy = py + size * 0.5;
-  const scale = Math.min(1.0, Math.max(0.5, amount / 200));
+  const scale = Math.min(1.0, Math.max(0.5, amount / 1500));
   const s = size * 0.22 * scale;
   const seed = (Math.floor(px * 23 + py * 41)) % 100;
 
@@ -442,9 +863,157 @@ export function drawCrystalDeposit(
   }
 }
 
+/** Draw any of the four inexhaustible map deposits. Ore and crystal keep
+ * their established silhouettes; Steel and Coal use compact industrial nodules
+ * so every resource is visually distinct on the tactical map. Richness changes
+ * the presentation scale, never the existence of the field. */
+export function drawResourceDeposit(
+  ctx: CanvasRenderingContext2D,
+  resource: string,
+  px: number,
+  py: number,
+  size: number,
+  amount: number,
+  tick: number,
+  richness: number = 1,
+): void {
+  // The amount argument is a legacy marker. Richness is the authoritative
+  // visual tier for an infinite deposit, with a safe legacy fallback.
+  const visualRichness = richness > 0 ? richness : amount > 0 ? 1 : 1;
+  const visualAmount = Math.max(1, Math.min(3, visualRichness)) * 500;
+  if (resource === "Ore") {
+    drawOreDeposit(ctx, px, py, size, visualAmount, tick);
+    return;
+  }
+  if (resource === "Crystal") {
+    drawCrystalDeposit(ctx, px, py, size, visualAmount, tick);
+    return;
+  }
+
+  const cx = px + size * 0.5;
+  const cy = py + size * 0.56;
+  const scale = 0.45 + Math.max(0, Math.min(2, richness - 1)) * 0.18;
+  const s = size * 0.2 * scale;
+  const steel = resource === "Steel";
+  const glow = steel ? "rgba(148, 163, 184, 0.20)" : "rgba(30, 41, 59, 0.32)";
+  const edge = steel ? "#334155" : "#111827";
+  const light = steel ? "#cbd5e1" : "#64748b";
+  const mid = steel ? "#64748b" : "#374151";
+  const dark = steel ? "#1e293b" : "#030712";
+
+  ctx.fillStyle = glow;
+  ctx.fillRect(Math.floor(cx - s * 2), Math.floor(cy - s), Math.floor(s * 4), Math.floor(s * 2));
+  pRect(ctx, cx - s * 1.15, cy, s * 2.3, s * 0.55, dark);
+  pRect(ctx, cx - s * 0.9, cy - s * 0.12, s * 1.8, s * 0.28, edge);
+  const chunks = [
+    { dx: -0.62, dy: 0.02, w: 0.42, h: 0.58 },
+    { dx: -0.15, dy: -0.2, w: 0.52, h: 0.82 },
+    { dx: 0.38, dy: -0.02, w: 0.45, h: 0.64 },
+  ];
+  for (const chunk of chunks) {
+    const x = Math.floor(cx + s * chunk.dx);
+    const y = Math.floor(cy + s * chunk.dy);
+    const w = Math.max(2, Math.floor(s * chunk.w));
+    const h = Math.max(3, Math.floor(s * chunk.h));
+    pRect(ctx, x - 1, y - h - 1, w + 2, h + 2, dark);
+    pRect(ctx, x, y - h, w, h, mid);
+    pRect(ctx, x, y - h, Math.max(1, Math.floor(w * 0.45)), h, light);
+    pRect(ctx, x, y - h, w, 1, steel ? "#f1f5f9" : "#94a3b8");
+  }
+  pRect(ctx, cx - s * 0.95, cy + s * 0.18, s * 0.35, 1.5, steel ? "#e2e8f0" : "#94a3b8");
+  pRect(ctx, cx + s * 0.3, cy + s * 0.2, s * 0.45, 1.5, light);
+  if (Math.sin(tick * 0.2 + px + py) > 0.5) {
+    pRect(ctx, cx + s * 0.65, cy - s * 0.7, 2, 2, steel ? "#f8fafc" : "#cbd5e1");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Unit Sprites (Command & Conquer Chunky Pixel-Art Military Hardware)
 // ---------------------------------------------------------------------------
+
+/**
+ * Renders the Civilization-style construction progression overlay:
+ * - The unbuilt portion (from top down to the horizon) is greyed out with
+ *   a desaturated blueprint wash and scaffolding lattice.
+ * - The built portion (from the horizon down to the bottom) is in full vivid color.
+ * - A glowing golden/amber laser construction beam scans across the horizon line
+ *   with animated spark particles.
+ * - A turn countdown progress bar with discrete turn markers is drawn at the base.
+ */
+export function drawCivUnGreyOverlay(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  w: number,
+  h: number,
+  progress: number,
+  buildTime: number,
+  tick: number = 0,
+): void {
+  if (buildTime <= 0) return;
+  const frac = Math.max(0, Math.min(1, progress / buildTime));
+  const halfW = w / 2;
+  const halfH = h / 2;
+
+  if (frac < 1) {
+    const horizonY = cy + halfH - h * frac;
+
+    // 1. Greyed-out / Blueprint wash over the unbuilt region
+    ctx.save();
+    ctx.fillStyle = "rgba(18, 24, 34, 0.76)";
+    const unbuiltH = horizonY - (cy - halfH);
+    if (unbuiltH > 0) {
+      ctx.fillRect(Math.floor(cx - halfW), Math.floor(cy - halfH), Math.floor(w), Math.floor(unbuiltH));
+
+      // Blueprint lattice / scaffolding lines
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.30)";
+      ctx.lineWidth = 1;
+      const step = Math.max(4, Math.floor(w * 0.15));
+      for (let y = cy - halfH; y < horizonY; y += step) {
+        ctx.beginPath();
+        ctx.moveTo(Math.floor(cx - halfW), Math.floor(y) + 0.5);
+        ctx.lineTo(Math.floor(cx + halfW), Math.floor(y) + 0.5);
+        ctx.stroke();
+      }
+      for (let x = cx - halfW; x < cx + halfW; x += step) {
+        ctx.beginPath();
+        ctx.moveTo(Math.floor(x) + 0.5, Math.floor(cy - halfH));
+        ctx.lineTo(Math.floor(x) + 0.5, Math.floor(horizonY));
+        ctx.stroke();
+      }
+    }
+
+    // 2. Glowing golden construction laser line at the horizon
+    pRect(ctx, cx - halfW, horizonY - 1, w, 2, "#f59e0b");
+    pRect(ctx, cx - halfW + 1, horizonY, w - 2, 1, "#fef08a");
+
+    // Dynamic laser sparks drifting along the horizon
+    const sparkOffset1 = Math.floor(((tick * 2.5) % Math.max(1, w - 4)));
+    const sparkOffset2 = Math.floor((((tick * 1.8) + w * 0.5) % Math.max(1, w - 4)));
+    pRect(ctx, cx - halfW + sparkOffset1, horizonY - 2, 3, 3, "#ffffff");
+    pRect(ctx, cx - halfW + sparkOffset2, horizonY - 1, 2, 2, "#fde047");
+
+    ctx.restore();
+  }
+
+  // 3. Turn progress meter with discrete turn notch dividers
+  const barW = Math.floor(w * 0.90);
+  const barH = 5;
+  const barY = Math.floor(cy + halfH + 2);
+  pRect(ctx, cx - barW / 2 - 1, barY - 1, barW + 2, barH + 2, "#09090b");
+  pRect(ctx, cx - barW / 2, barY, barW, barH, "#18181b");
+  const fillW = Math.max(1, Math.floor(barW * frac));
+  pRect(ctx, cx - barW / 2, barY, fillW, barH, "#f59e0b");
+  pRect(ctx, cx - barW / 2, barY, fillW, 1, "#fde047");
+
+  // Discrete turn notches
+  if (buildTime > 1) {
+    for (let step = 1; step < buildTime; step++) {
+      const stepX = Math.floor(cx - barW / 2 + (barW * step) / buildTime);
+      pRect(ctx, stepX, barY, 1, barH, "#09090b");
+    }
+  }
+}
 
 export function drawUnitSprite(
   ctx: CanvasRenderingContext2D,
@@ -458,6 +1027,8 @@ export function drawUnitSprite(
   isStale: boolean = false,
   firingAge: number = -1,
   isMoving: boolean = false,
+  progress: number = 0,
+  buildTime: number = 0,
 ): void {
   const pal = getTeamPalette(owner, isStale);
 
@@ -495,6 +1066,11 @@ export function drawUnitSprite(
       break;
     default:
       pRect(ctx, -4, -4, 8, 8, pal.primary);
+  }
+
+  // Civilization-style un-greying if unit is under construction / training
+  if (buildTime > 0) {
+    drawCivUnGreyOverlay(ctx, 0, 0, zoom * 0.85, zoom * 0.85, progress, buildTime, tick);
   }
 
   ctx.restore();
@@ -876,16 +1452,9 @@ export function drawBuildingSprite(
       pRect(ctx, -zoom * 0.4, -zoom * 0.4, zoom * 0.8, zoom * 0.8, pal.primary);
   }
 
-  // Production progress bar for producing structures
-  if (buildTime > 0 && progress > 0) {
-    const barW = Math.floor(zoom * 0.85);
-    const barH = 4;
-    const barY = Math.floor(zoom * 0.48);
-    pRect(ctx, -barW / 2 - 1, barY - 1, barW + 2, barH + 2, "#09090b");
-    pRect(ctx, -barW / 2, barY, barW, barH, "#1c1917");
-    const fillW = Math.floor(barW * Math.min(1, progress / buildTime));
-    pRect(ctx, -barW / 2, barY, fillW, barH, "#f59e0b");
-    pRect(ctx, -barW / 2, barY, fillW, 1, "#fde047");
+  // Civilization-style un-greying construction & production progression
+  if (buildTime > 0) {
+    drawCivUnGreyOverlay(ctx, 0, 0, zoom * 0.92, zoom * 0.92, progress, buildTime, tick);
   }
 
   ctx.restore();
@@ -1146,13 +1715,13 @@ function drawRefinery(
   const bubble = Math.sin(tick * 0.3) > 0 ? 1 : -1;
   pRect(ctx, -2 + bubble * 5, -r * 0.1 + 4, 3, 2, "#ffffff");
 
-  // 6. Heavy Harvester Unloading Dock with hazard ramp
+  // 6. Resource intake hopper with hazard ramp (the deposit feeds in here)
   const dockW = Math.floor(r * 1.35);
   const dockH = Math.floor(r * 0.6);
   pRect(ctx, -dockW / 2, r * 0.35, dockW, dockH, "#090d16");
   pRect(ctx, -dockW / 2 + 1, r * 0.35 + 1, dockW - 2, dockH - 2, pal.primaryDark);
 
-  // Unloading conveyor belt & hazard stripes
+  // Intake conveyor belt & hazard stripes
   pRect(ctx, -dockW * 0.35, r * 0.38, dockW * 0.7, dockH * 0.55, "#1c1917");
   pHazard(ctx, -dockW / 2 + 2, r * 0.72, dockW - 4, 3);
 }
@@ -1727,7 +2296,7 @@ export function drawTacticalIcon(
     pRect(ctx, 16, -10, 3, 9, "#09090b");
     pRect(ctx, 17, -9, 1, 7, "#facc15");
   } else if (norm === "harvester") {
-    // Heavy mining harvester
+    // Legacy mining harvester (unused; no harvester unit exists in the roster)
     pRect(ctx, -16, -14, 32, 6, "#1e293b");
     pRect(ctx, -15, -13, 30, 4, "#334155");
     pRect(ctx, -14, -12, 28, 2, "#64748b");
@@ -2527,9 +3096,29 @@ function drawAATurret(
   ctx.restore();
 }
 
+/** Kinds with a dedicated SVG icon in the in-repo asset pack; these are
+ *  served as crisp `<img>` sources instead of canvas thumbnails (A2). */
+const SVG_THUMBNAIL_KINDS = new Set([
+  // Units
+  "Infantry", "Scout", "RocketTrooper", "Tank", "Artillery", "MammothTank",
+  "Gunship", "Interceptor", "SamLauncher",
+  // Buildings
+  "Hq", "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory",
+  "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret",
+]);
+
+function unitAssetPath(kind: string): string {
+  return `/assets/units/${kind.toLowerCase()}.svg`;
+}
+
 export function getThumbnailDataUrl(kind: string, _owner: number = 0): string {
   const cached = thumbnailCache.get(kind);
   if (cached) return cached;
+
+  if (SVG_THUMBNAIL_KINDS.has(kind)) {
+    thumbnailCache.set(kind, unitAssetPath(kind));
+    return unitAssetPath(kind);
+  }
 
   if (typeof document === "undefined") {
     const fallback = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" fill="%2318181b"/></svg>`;

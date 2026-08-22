@@ -27,6 +27,7 @@ fn scripted_replay(seed: u64) -> Replay {
         winner: g.winner,
         reason: g.win_reason,
         duration_turns: g.turn,
+        duration_rounds: g.round,
     });
     replay
 }

@@ -220,6 +220,27 @@ async fn main() {
     let static_dir = std::env::var("CRUCIBLE_CLIENT_DIR").unwrap_or_else(|_| "client/dist".into());
     tracing::info!("serving static client from {static_dir}");
 
+    async fn add_cache_headers(
+        req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        let path = req.uri().path().to_string();
+        let mut resp = next.run(req).await;
+        let headers = resp.headers_mut();
+        if path.starts_with("/assets/") {
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+        } else if path.ends_with(".html") || path == "/" || !path.contains('.') {
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+            );
+        }
+        resp
+    }
+
     let app = Router::new()
         .route("/api/hello", get(hello))
         .route("/api/health", get(health))
@@ -235,6 +256,7 @@ async fn main() {
         .route("/api/autobattle/{a}/{b}", post(http::autobattle))
         .route("/ws", get(ws::handler))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
+        .layer(axum::middleware::from_fn(add_cache_headers))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

@@ -3,13 +3,16 @@
 //! The pure, deterministic simulation core for CRUCIBLE. No IO, no threads,
 //! no OS calls, no wall clock. Compiles identically for native and wasm.
 //!
-//! The game is **turn-based** (alternating turns on a 64×64 tile grid).
-//! The determinism contract:
+//! The game is **turn-based** (alternating activations on a 128×128 tile
+//! grid). A player-facing `round` contains one P0 activation and one P1
+//! activation; the legacy `turn` field remains the monotonic activation
+//! counter used by replay stamps and timeouts. The determinism contract:
 //! - All randomness flows through the injected seeded [`Rng`](rng::Rng) —
 //!   used by map generation only; in-game resolution is fully deterministic.
 //! - Only the `active` player may act; commands execute immediately.
 //!   [`Game::end_turn`] runs the fixed lifecycle: turret fire → sweep → fog →
-//!   win check → opponent start-of-turn (income → production → resets → fog).
+//!   win check → opponent start-of-activation (income → production → resets
+//!   → fog). The server/headless driver pairs those activations into rounds.
 //! - Entities are iterated in ascending id order everywhere.
 //! - Integer math only; no platform-variable float functions in game-state
 //!   math.
@@ -29,8 +32,10 @@ pub mod tech;
 pub mod tiles;
 
 pub use entity::{
-    building_produces, building_stats, unit_stats, Building, BuildingType, EntityId, Player, Unit,
-    UnitType, FOG_MEMORY_TURNS, HQ_INCOME_PER_TURN, PLACE_RADIUS_TILES, REFINERY_ORE_PER_TURN,
+    building_produces, building_stats, unit_stats, Building, BuildingType, EntityId, Player,
+    ResourceBundle, ResourceType, Unit, UnitType, CRYSTAL_REFINERY_BASE_YIELD_PER_TURN,
+    FOG_MEMORY_TURNS, HQ_INCOME_PER_TURN, PLACE_RADIUS_TILES, REFINERY_BASE_YIELD_PER_TURN,
+    REFINERY_ORE_PER_TURN,
 };
 pub use game::{EventKind, Game, GameConfig, GameEvent, WinReason};
 pub use map::{open_test_map, Map};

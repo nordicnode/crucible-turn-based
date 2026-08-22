@@ -1,5 +1,5 @@
-//! M1 acceptance tests: cross-run byte-identical snapshots (golden hashes) and
-//! map fairness invariants.
+//! Determinism acceptance tests: cross-run byte-identical snapshots (golden
+//! hashes) and strategic map invariants.
 //!
 //! The golden hashes pin the *exact* serialized state of a scripted match at
 //! specific turns. If any change alters sim behavior (float use, HashMap
@@ -10,6 +10,7 @@
 //! exercise *identical* code paths against the *same* constants — proving
 //! native/wasm parity rather than two hand-kept copies drifting apart.
 
+use crucible_sim::map::{MAP_SIZE, MAP_TILES};
 use crucible_sim::{building_stats, unit_stats, BuildingType, Map, UnitType};
 
 #[test]
@@ -34,26 +35,68 @@ fn same_seed_replays_byte_identical() {
 }
 
 #[test]
-fn map_fairness_over_10k_seeds() {
+fn strategic_map_invariants_over_10k_seeds() {
+    // The modern generator is intentionally asymmetric: mirrored maps are
+    // predictable, not strategically interesting. Fairness is instead a
+    // scored constraint over spawn envelopes, route cost, and resource bands.
+    let mut saw_asymmetry = false;
     for seed in 0..10_000u64 {
         let map = Map::generate(seed);
-        for idx in 0..(64 * 64) {
-            let (x, y) = (idx % 64, idx / 64);
-            let midx = (63 - y) * 64 + (63 - x);
+        assert_eq!(map.passable.len(), MAP_TILES);
+        assert_eq!(map.terrain.len(), MAP_TILES);
+        assert_eq!(map.resource_kind.len(), MAP_TILES);
+        assert_eq!(map.richness.len(), MAP_TILES);
+
+        let mut counts = [0usize; 4];
+        let mut asymmetry = false;
+        for idx in 0..MAP_TILES {
             assert_eq!(
-                map.passable[idx], map.passable[midx],
-                "passable asymmetry seed {seed}"
+                map.passable[idx],
+                map.terrain[idx].is_passable(),
+                "passability drift seed {seed} idx {idx}"
             );
-            assert_eq!(map.ore[idx], map.ore[midx], "ore asymmetry seed {seed}");
+            let (x, y) = crucible_sim::map::tile_coords(idx);
+            let mirror = MAP_SIZE as u8 - 1;
+            let mirror_idx = crucible_sim::map::tile_index(mirror - x, mirror - y);
+            if map.terrain[idx] != map.terrain[mirror_idx]
+                || map.resource_kind[idx] != map.resource_kind[mirror_idx]
+                || map.ore[idx] != map.ore[mirror_idx]
+                || map.steel[idx] != map.steel[mirror_idx]
+                || map.coal[idx] != map.coal[mirror_idx]
+                || map.crystal[idx] != map.crystal[mirror_idx]
+            {
+                asymmetry = true;
+            }
+            let kind = map.resource_at(x, y);
+            let amount = map.resource_amount_at(x, y);
+            match kind {
+                Some(resource) => {
+                    assert!(amount > 0, "empty resource metadata seed {seed} idx {idx}");
+                    assert!((1..=3).contains(&map.resource_richness_at(x, y)));
+                    counts[resource.index()] += 1;
+                }
+                None => {
+                    assert_eq!(
+                        amount, 0,
+                        "resource amount without kind seed {seed} idx {idx}"
+                    );
+                    assert_eq!(
+                        map.richness[idx], 0,
+                        "richness without resource seed {seed} idx {idx}"
+                    );
+                }
+            }
         }
-        assert_eq!(
-            map.hq_tiles[0],
-            (63 - map.hq_tiles[1].0, 63 - map.hq_tiles[1].1),
-            "HQ mirror seed {seed}"
+        assert!(
+            counts.iter().all(|&count| count >= 5),
+            "resource roster incomplete for seed {seed}: {counts:?}"
         );
         assert!(map.is_passable(map.hq_tiles[0].0, map.hq_tiles[0].1));
         assert!(map.is_passable(map.hq_tiles[1].0, map.hq_tiles[1].1));
+        assert_ne!(map.hq_tiles[0], map.hq_tiles[1]);
+        saw_asymmetry |= asymmetry;
     }
+    assert!(saw_asymmetry, "generator unexpectedly remained mirrored");
 }
 
 /// Every generated map must let either player put a Refinery down on turn 1:
@@ -73,7 +116,9 @@ fn every_map_supports_turn1_refinery() {
         );
         let hq = g.hq(Player::P0).unwrap().tile;
         let ore = nearest_ore_tile(&g, hq);
-        let tile = free_refinery_slot(&g, ore);
+        // A refinery claims the deposit tile itself; no adjacent slot is
+        // needed and the resource remains extractable under the footprint.
+        let tile = ore;
         let res = g.apply_commands(
             Player::P0,
             &[Command::PlaceBuilding {
@@ -108,42 +153,6 @@ fn nearest_ore_tile(g: &crucible_sim::Game, from: (u8, u8)) -> (u8, u8) {
         }
     }
     best.unwrap().1
-}
-
-/// A passable, unoccupied, non-ore neighbor of `t`, ascending tile-index (the
-/// same tie-break the golden scenario and bots use).
-fn free_refinery_slot(g: &crucible_sim::Game, t: (u8, u8)) -> (u8, u8) {
-    let mut candidates: Vec<(u8, u8)> = [
-        (1i32, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (1, -1),
-        (-1, 1),
-        (-1, -1),
-    ]
-    .iter()
-    .filter_map(|&(dx, dy)| {
-        let (x, y) = (t.0 as i32 + dx, t.1 as i32 + dy);
-        if x >= 0 && y >= 0 && x < 64 && y < 64 && !(x == t.0 as i32 && y == t.1 as i32) {
-            Some((x as u8, y as u8))
-        } else {
-            None
-        }
-    })
-    .collect();
-    candidates.sort_by_key(|&tt| crucible_sim::map::tile_index(tt.0, tt.1));
-    // Fall through to `t` itself if every neighbor is blocked (never for the
-    // generated maps, which guarantee connectivity).
-    candidates
-        .into_iter()
-        .find(|&tt| {
-            g.map.is_passable(tt.0, tt.1)
-                && g.building_at(tt).is_none()
-                && g.map.ore_at(tt.0, tt.1) == 0
-        })
-        .unwrap_or(t)
 }
 
 #[allow(dead_code)]

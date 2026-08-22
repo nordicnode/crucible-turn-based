@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="3" fill="#5f8246"/>
+  <rect x="0" y="8" width="32" height="16" fill="#2f84b0"/>
+  <rect x="0" y="13" width="32" height="6" fill="#3b93bd"/>
+  <path d="M0 8h32M0 24h32" stroke="#78995a" stroke-width="1.6"/>
+  <g stroke="#9fd6ee" stroke-width="1.4" stroke-linecap="round">
+    <path d="M2 14h6M14 16h8M24 12h5">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/>
+    </path>
+  </g>
+  <path d="M4 5v-2M6 5v-3M20 27v-2M22 27v-3" stroke="#8faf68" stroke-width="1.4" stroke-linecap="round"/>
+  <rect x="2" y="2" width="28" height="28" rx="3" fill="none" stroke="#1e3424" stroke-opacity="0.35"/>
+</svg>

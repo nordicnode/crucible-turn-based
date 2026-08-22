@@ -11,6 +11,10 @@ use crate::game::Game;
 use crate::map::{tile_index, MAP_TILES};
 use crate::tiles::within_range;
 
+fn default_known_tiles() -> Vec<bool> {
+    vec![false; MAP_TILES]
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RememberedUnit {
     pub id: EntityId,
@@ -38,6 +42,12 @@ pub struct FogMemory {
     /// Crystal tiles this player has ever seen (same scouting contract as ore).
     #[serde(default)]
     pub known_crystal: Vec<bool>,
+    /// Steel tiles this player has ever seen.
+    #[serde(default = "default_known_tiles")]
+    pub known_steel: Vec<bool>,
+    /// Coal tiles this player has ever seen.
+    #[serde(default = "default_known_tiles")]
+    pub known_coal: Vec<bool>,
     /// Every tile this player has ever seen (monotonic; powers the AI's
     /// "unexplored fraction" observation). `#[serde(default)]` keeps old
     /// persisted states loadable — a missing field starts fully unexplored.
@@ -52,6 +62,8 @@ impl Default for FogMemory {
             buildings: Vec::new(),
             known_ore: vec![false; MAP_TILES],
             known_crystal: vec![false; MAP_TILES],
+            known_steel: vec![false; MAP_TILES],
+            known_coal: vec![false; MAP_TILES],
             explored: vec![false; MAP_TILES],
         }
     }
@@ -70,6 +82,8 @@ pub struct FogView {
     pub buildings: Vec<RememberedBuilding>,
     pub known_ore: Vec<bool>,
     pub known_crystal: Vec<bool>,
+    pub known_steel: Vec<bool>,
+    pub known_coal: Vec<bool>,
     /// Every tile this player has ever seen.
     pub explored: Vec<bool>,
 }
@@ -140,6 +154,8 @@ impl Game {
             buildings,
             known_ore: mem.known_ore.clone(),
             known_crystal: mem.known_crystal.clone(),
+            known_steel: mem.known_steel.clone(),
+            known_coal: mem.known_coal.clone(),
             explored: mem.explored.clone(),
         }
     }
@@ -156,7 +172,7 @@ impl Game {
             stamp_radius(&mut vis, u.tile, r);
         }
         for b in &self.buildings {
-            if b.owner != player || !b.is_alive() {
+            if b.owner != player || !b.is_operational() {
                 continue;
             }
             let r = crate::entity::building_stats(b.btype).vision_tiles;
@@ -172,14 +188,24 @@ impl Game {
                 mem.explored[idx] = true;
             }
         }
-        for (idx, &amount) in self.map.ore.iter().enumerate() {
-            if amount > 0 && visible[idx] {
-                mem.known_ore[idx] = true;
+        for (idx, is_visible) in visible.iter().copied().enumerate().take(MAP_TILES) {
+            if !is_visible
+                || self.map.resource_amount_at(
+                    (idx % crate::map::MAP_SIZE) as u8,
+                    (idx / crate::map::MAP_SIZE) as u8,
+                ) <= 0
+            {
+                continue;
             }
-        }
-        for (idx, &amount) in self.map.crystal.iter().enumerate() {
-            if amount > 0 && visible[idx] {
-                mem.known_crystal[idx] = true;
+            match self.map.resource_at(
+                (idx % crate::map::MAP_SIZE) as u8,
+                (idx / crate::map::MAP_SIZE) as u8,
+            ) {
+                Some(crate::entity::ResourceType::Ore) => mem.known_ore[idx] = true,
+                Some(crate::entity::ResourceType::Crystal) => mem.known_crystal[idx] = true,
+                Some(crate::entity::ResourceType::Steel) => mem.known_steel[idx] = true,
+                Some(crate::entity::ResourceType::Coal) => mem.known_coal[idx] = true,
+                None => {}
             }
         }
 

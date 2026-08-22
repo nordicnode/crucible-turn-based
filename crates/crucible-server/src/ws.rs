@@ -2,11 +2,11 @@
 //! human commands are validated identically to the bot's, and the client only
 //! receives the human player's fogged view.
 //!
-//! The match is strictly alternating-turn. P0 is the human: their command
-//! batches apply immediately as they arrive, and the game only advances when
-//! an `EndTurn` flips the turn to P1. While `game.active == P1` the server
-//! asks the bot for its turn's commands, applies them, and broadcasts; the
-//! bot's own `EndTurn` hands the turn back. There is no wall-clock tick.
+//! The sim uses alternating activations, while the live protocol exposes a
+//! player-facing round boundary. P0 is the human: command batches apply
+//! immediately, and an `EndTurn` synchronously drives exactly one P1 bot
+//! activation before the server publishes the next P0-ready diff. There is no
+//! intermediate bot-state broadcast and no wall-clock tick.
 
 use std::time::Duration;
 
@@ -21,9 +21,12 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crucible_ai::{easy, hard, medium, Bot, GenomeBot};
+use crucible_ai::{drive_bot_turn, easy, hard, medium, Bot, GenomeBot};
 use crucible_sim::{
-    entity::BuildingType, Command, Game, GameConfig, Map, Player, Replay, ReplayResult, UnitType,
+    entity::{BuildingType, ResourceBundle, ResourceType},
+    map::{tile_index, Terrain, MAP_SIZE, MAP_TILES},
+    tiles::within_range,
+    unit_stats, Command, Game, GameConfig, Map, Player, Replay, ReplayResult, UnitType,
 };
 
 use crate::store::Store;
@@ -34,6 +37,13 @@ const MAX_MOVE_GROUP_UNITS: usize = 32;
 const MAX_MOVE_GROUP_UNITS_PER_BATCH: usize = 64;
 const COMMAND_CHANNEL_CAPACITY: usize = 4;
 
+/// Inputs are kept on one bounded channel so inspection requests cannot create
+/// an unbounded side queue while the bot is taking its turn.
+enum ClientInput {
+    Commands(Vec<Command>),
+    InspectTile { x: u8, y: u8 },
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ClientMsg {
@@ -42,6 +52,11 @@ enum ClientMsg {
     },
     Commands {
         cmds: Vec<Command>,
+    },
+    /// Request the authoritative, fog-filtered facts for one map tile.
+    InspectTile {
+        x: u8,
+        y: u8,
     },
     /// End the active player's turn (only valid from `game.active`; the sim
     /// runs the full lifecycle: turret fire → income → production → opponent).
@@ -53,6 +68,7 @@ enum ClientMsg {
 enum ServerMsg {
     MatchStart(MatchStartMsg),
     StateDiff(StateDiffMsg),
+    TileInspection(TileInspectionMsg),
     CommandRejected(CommandRejectedMsg),
     MatchEnd(MatchEndMsg),
     /// The server is at its concurrent-match capacity; the client should
@@ -69,26 +85,66 @@ struct MatchStartMsg {
     /// Serde terrain names per tile ("Plains", "Forest", …) so the client
     /// renders the same typed terrain the sim moves/defends on.
     terrain: Vec<String>,
+    /// Authoritative presentation metadata for the tile inspector. The
+    /// per-tile `terrain` array remains compact; this table contains one entry
+    /// per terrain kind.
+    terrain_rules: Vec<TerrainRuleMsg>,
+    /// Coarse climate fields explain biome placement to replays/tools and let
+    /// clients add texture without inventing map facts.
+    elevation: Vec<u8>,
+    moisture: Vec<u8>,
+    temperature: Vec<u8>,
     hq: [(u8, u8); 2],
 }
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+struct TerrainRuleMsg {
+    kind: String,
+    label: String,
+    passable: bool,
+    move_multiplier: i32,
+    defense_reduction: i32,
+    tactical_tag: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 struct StateDiffMsg {
+    /// Legacy activation counter (one P0 or P1 activation).
     turn: i32,
-    /// Index of the player whose turn it is (0 = P0/human, 1 = P1/bot).
+    /// Player-facing round containing the current activation pair.
+    round: i32,
+    /// Index of the player whose activation is current. Human matches publish
+    /// only after the bot has resolved, so this is normally P0 on the wire.
     active_player: u8,
+    /// Legacy scalar fields retained for older clients.
     ore: i32,
-    /// Banked strategic crystal (spent on the deep research).
     crystal: i32,
+    steel: i32,
+    coal: i32,
+    /// Authoritative four-resource wallet for the current player.
+    resources: ResourceBundle,
+    /// Estimated next-turn income, including the HQ and active refineries.
+    income: ResourceBundle,
     power_produced: i32,
     power_consumed: i32,
     research: ResearchMsg,
     entities: Vec<DiffEntity>,
+    /// Generic visible/known resource deposits. Deposits are infinite; the
+    /// legacy `amount` marker remains only for replay/client compatibility.
+    resource_tiles: Vec<ResourceTile>,
+    /// Legacy split fields retained during the wire transition.
     ore_tiles: Vec<OreTile>,
     crystal_tiles: Vec<CrystalTile>,
     visible: Vec<u16>,
     events: Vec<DiffEvent>,
+    /// Actions spent by the active player this turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions_spent: Option<i32>,
+    /// Max actions per turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions_cap: Option<i32>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -96,7 +152,10 @@ struct StateDiffMsg {
 struct MatchEndMsg {
     winner: Option<u8>,
     reason: Option<crucible_sim::WinReason>,
+    /// Legacy activation duration.
     duration_turns: i32,
+    /// Player-facing round duration.
+    duration_rounds: i32,
     replay_id: Option<i64>,
 }
 
@@ -122,6 +181,17 @@ struct DiffEntity {
     /// Turns since this enemy was last seen (own entities are never stale).
     #[serde(skip_serializing_if = "Option::is_none")]
     stale: Option<i32>,
+    /// Current and maximum movement points for own units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mp: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_mp: Option<i32>,
+    /// Durable movement destination for own units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_target: Option<(u8, u8)>,
+    /// Deterministic route preview for own units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    movement_path: Option<Vec<(u8, u8)>>,
     /// Own-building production queue (unit kind names, oldest first).
     #[serde(skip_serializing_if = "Option::is_none")]
     queue: Option<Vec<String>>,
@@ -131,6 +201,29 @@ struct DiffEntity {
     /// Build time of the current queue head, in turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     build_time: Option<i32>,
+    /// Construction progress of an owned building, in turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    construction_progress: Option<i32>,
+    /// Construction duration of an owned building, in turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    construction_time: Option<i32>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ResourceTile {
+    x: u8,
+    y: u8,
+    resource: ResourceType,
+    /// Legacy static marker. It is never a remaining reserve.
+    amount: i32,
+    richness: u8,
+    /// Explicit economy contract: this deposit never depletes.
+    infinite: bool,
+    /// Base/tech-adjusted extraction estimate for a refinery on this tile.
+    yield_per_turn: i32,
+    /// Owner of the refinery claiming this tile, if any.
+    refinery_owner: Option<u8>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -147,6 +240,58 @@ struct CrystalTile {
     amount: i32,
 }
 
+/// Authoritative tile facts returned after a client selects a tile. Dynamic
+/// details are filtered through the same fog view used by state diffs.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TileInspectionMsg {
+    x: u8,
+    y: u8,
+    index: u16,
+    visibility: String,
+    terrain: Option<TerrainRuleMsg>,
+    /// Climate facts are revealed only for explored tiles, never from hidden
+    /// map state.
+    elevation: Option<u8>,
+    moisture: Option<u8>,
+    temperature: Option<u8>,
+    resource: Option<ResourceTile>,
+    occupants: Vec<DiffEntity>,
+    movement: Vec<TileMovementMsg>,
+    route_targets: Vec<RouteTargetMsg>,
+    placement: PlacementFactsMsg,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TileMovementMsg {
+    unit_id: u32,
+    unit_kind: String,
+    move_points: i32,
+    terrain_cost: i32,
+    can_enter: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct RouteTargetMsg {
+    unit_id: u32,
+    target: (u8, u8),
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct PlacementFactsMsg {
+    known: bool,
+    passable: Option<bool>,
+    occupied_by_building: bool,
+    occupied_by_unit: bool,
+    resource: Option<ResourceType>,
+    within_base_radius: bool,
+    structure_site_available: bool,
+    refinery_site_available: bool,
+}
+
 /// The player's research dashboard: the accruing point pool, the tech being
 /// worked on (serde name, if any), and the completed technologies.
 #[derive(Serialize, Clone, Debug)]
@@ -159,6 +304,7 @@ struct ResearchMsg {
 #[derive(Serialize, Clone, Debug)]
 struct DiffEvent {
     turn: i32,
+    round: i32,
     kind: String,
     /// Amount for `ore_mined` / `sold` events (null otherwise) — lets the
     /// client show per-turn income, since refineries bank passively.
@@ -191,7 +337,7 @@ async fn run(
 
     // Wait for JoinMatch, with a deadline: a connection that never greets
     // would otherwise squat on its socket (and file descriptor) forever.
-    let opponent = match tokio::time::timeout(Duration::from_secs(10), async {
+    let mut opponent = match tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match receiver.next().await {
                 Some(Ok(Message::Text(t))) => {
@@ -230,10 +376,31 @@ async fn run(
         }
     };
 
+    // F2 save/resume: `opponent == "saved"` restores the most recent live
+    // match snapshot from the store (single-use) and continues it.
+    let store = state.store.clone();
+    let mut resume: Option<(String, Game, Replay)> = None;
+    if opponent == "saved" {
+        let store2 = store.clone();
+        resume = tokio::task::spawn_blocking(move || {
+            let save = store2.latest_save().ok().flatten()?;
+            let game: Game = serde_json::from_str(&save.game_json).ok()?;
+            let mut replay = Replay::from_json(&save.replay_json).ok()?;
+            replay.result = None; // the resumed match re-records its outcome
+            let _ = store2.delete_save(&save.key); // saves are single-use
+            Some((save.opponent, game, replay))
+        })
+        .await
+        .ok()
+        .flatten();
+    }
+
     // Resolve the opponent off the async runtime: it reads the store (SQLite
     // behind a mutex), which can stall live match handling if contended.
+    let opponent_name = resume
+        .as_ref()
+        .map_or_else(|| opponent.clone(), |(opp, _, _)| opp.clone());
     let store = state.store.clone();
-    let opponent_name = opponent.clone();
     let mut bot: Box<dyn Bot> =
         match tokio::task::spawn_blocking(move || resolve_opponent(&store, &opponent_name)).await {
             Ok(bot) => bot,
@@ -244,14 +411,25 @@ async fn run(
         };
 
     // Seed from the wall clock (server is the one place this is allowed); the
-    // seed is recorded in the replay so the match stays reproducible.
-    let seed = seed_now();
-    let config = timeout_override(GameConfig::default());
-    let mut game = Game::new(Map::generate(seed), config.clone());
-    let mut replay = Replay::new(seed, config);
+    // seed is recorded in the replay so the match stays reproducible. A
+    // resumed match keeps its original seed and command log.
+    let (seed, mut game, mut replay) = match resume {
+        Some((opp, game, replay)) => {
+            opponent = opp;
+            (game.map.seed, game, replay)
+        }
+        None => {
+            let seed = seed_now();
+            let config = timeout_override(GameConfig::default());
+            let game = Game::new(Map::generate(seed), config.clone());
+            let replay = Replay::new(seed, config);
+            (seed, game, replay)
+        }
+    };
 
     let passable = game.map.passable.clone();
     let terrain: Vec<String> = game.map.terrain.iter().map(|t| format!("{t:?}")).collect();
+    let terrain_rules = terrain_rules();
     let hq = [game.map.hq_tiles[0], game.map.hq_tiles[1]];
 
     sender
@@ -261,14 +439,19 @@ async fn run(
                 player: Player::P0.index() as u8,
                 passable,
                 terrain,
+                terrain_rules,
+                elevation: game.map.elevation.clone(),
+                moisture: game.map.moisture.clone(),
+                temperature: game.map.temperature.clone(),
                 hq,
             }))?
             .into(),
         ))
         .await?;
 
-    // Incoming commands are buffered on a channel by a reader task.
-    let (tx, mut rx) = mpsc::channel::<Vec<Command>>(COMMAND_CHANNEL_CAPACITY);
+    // Incoming commands and tile-inspection requests are buffered on a
+    // bounded channel by a reader task.
+    let (tx, mut rx) = mpsc::channel::<ClientInput>(COMMAND_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(t) = msg {
@@ -278,7 +461,7 @@ async fn run(
                             tracing::warn!("dropping oversized command batch");
                             continue;
                         }
-                        if tx.try_send(cmds).is_err() {
+                        if tx.try_send(ClientInput::Commands(cmds)).is_err() {
                             tracing::warn!("dropping command batch: pending input limit reached");
                         }
                     }
@@ -286,10 +469,17 @@ async fn run(
                         // EndTurn is free (costs no action budget) and carries
                         // no payload; forward it as its own batch.
                         if tx
-                            .try_send(vec![Command::EndTurn { player: Player::P0 }])
+                            .try_send(ClientInput::Commands(vec![Command::EndTurn {
+                                player: Player::P0,
+                            }]))
                             .is_err()
                         {
                             tracing::warn!("dropping EndTurn: pending input limit reached");
+                        }
+                    }
+                    Ok(ClientMsg::InspectTile { x, y }) => {
+                        if tx.try_send(ClientInput::InspectTile { x, y }).is_err() {
+                            tracing::warn!("dropping tile inspection: pending input limit reached");
                         }
                     }
                     Ok(ClientMsg::JoinMatch { .. }) => {}
@@ -319,14 +509,29 @@ async fn run(
     // still persisted as a partial replay instead of being lost entirely.
     let result = match (async {
         loop {
-            // P0's turn: wait for their next batch. Nothing happens between
-            // batches — the sim has no wall clock.
-            let human_cmds = rx.recv().await.ok_or("client closed the connection")?;
+            // P0's activation: wait for their next batch. Nothing happens
+            // between batches — the sim has no wall clock.
+            let human_cmds = match rx.recv().await.ok_or("client closed the connection")? {
+                ClientInput::InspectTile { x, y } => {
+                    if let Some(inspection) = build_tile_inspection(&game, x, y) {
+                        sender
+                            .send(Message::Text(
+                                serde_json::to_string(&ServerMsg::TileInspection(inspection))?
+                                    .into(),
+                            ))
+                            .await?;
+                    }
+                    continue;
+                }
+                ClientInput::Commands(cmds) => cmds,
+            };
             if human_cmds.is_empty() {
                 continue;
             }
+            let human_turn = game.turn;
+            let human_round = game.round;
             for c in &human_cmds {
-                replay.record(game.turn, Player::P0, c.clone());
+                replay.record_at(human_round, human_turn, Player::P0, c.clone());
             }
             for (index, result) in game
                 .apply_commands(Player::P0, &human_cmds)
@@ -352,43 +557,36 @@ async fn run(
                     winner: game.winner,
                     reason: game.win_reason,
                     duration_turns: game.turn,
+                    duration_rounds: game.round,
                 });
             }
 
+            // EndTurn is a round boundary for the live protocol. Resolve the
+            // bot's complete activation before publishing a diff, so the
+            // client never observes a second, half-turn state.
+            if game.active == Player::P1 && !game.is_over() {
+                let bot_turn = game.turn;
+                let bot_round = game.round;
+                let bot_cmds = drive_bot_turn(&mut game, Player::P1, bot.as_mut());
+                for c in bot_cmds {
+                    replay.record_at(bot_round, bot_turn, Player::P1, c);
+                }
+            }
+            if game.is_over() {
+                return Ok(ReplayResult {
+                    winner: game.winner,
+                    reason: game.win_reason,
+                    duration_turns: game.turn,
+                    duration_rounds: game.round,
+                });
+            }
+
+            // Publish exactly one post-activation state. For a normal human
+            // match this is P0-ready and starts the next player-facing round.
             let diff = build_diff(&game, &mut last_event_turn);
             sender
                 .send(Message::Text(serde_json::to_string(&diff)?.into()))
                 .await?;
-
-            // While it is the bot's turn, drive it: one `decide` per own turn
-            // (its commands end with `EndTurn`, which hands the turn back).
-            // Defensive guard: a bot that omits `EndTurn` must not hang the
-            // connection forever, so force the lifecycle after 100 decides.
-            let mut bot_stall_guard = 0;
-            while game.active == Player::P1 && !game.is_over() {
-                bot_stall_guard += 1;
-                if bot_stall_guard > 100 {
-                    tracing::warn!("bot stalled without EndTurn; forcing end of turn");
-                    game.end_turn();
-                } else {
-                    let bot_cmds = bot.decide(&game, Player::P1);
-                    for c in &bot_cmds {
-                        replay.record(game.turn, Player::P1, c.clone());
-                    }
-                    game.apply_commands(Player::P1, &bot_cmds);
-                }
-                if game.is_over() {
-                    return Ok(ReplayResult {
-                        winner: game.winner,
-                        reason: game.win_reason,
-                        duration_turns: game.turn,
-                    });
-                }
-                let diff = build_diff(&game, &mut last_event_turn);
-                sender
-                    .send(Message::Text(serde_json::to_string(&diff)?.into()))
-                    .await?;
-            }
         }
     })
     .await
@@ -396,7 +594,11 @@ async fn run(
         Ok(result) => result,
         Err(e) => {
             // Client disconnected (or a send failed) mid-match: persist a
-            // partial replay so the match isn't lost, then propagate.
+            // partial replay so the match isn't lost, then propagate. If the
+            // match is still live, snapshot it too so the player can resume.
+            if !game.is_over() {
+                save_live(&state, seed, &opponent, &game, &replay).await;
+            }
             save_replay(&state, seed, &opponent, &game, &replay, None).await;
             return Err(e);
         }
@@ -412,12 +614,37 @@ async fn run(
                 winner: game.winner.map(|p| p.index() as u8),
                 reason: game.win_reason,
                 duration_turns: game.turn,
+                duration_rounds: game.round,
                 replay_id,
             }))?
             .into(),
         ))
         .await;
     Ok(())
+}
+
+/// F2: snapshot an in-progress match so the player can resume it later. The
+/// game state plus the partial replay (seed + command log) are stored so a
+/// resumed match continues recording seamlessly.
+async fn save_live(
+    state: &crate::AppState,
+    seed: u64,
+    opponent: &str,
+    game: &Game,
+    replay: &Replay,
+) {
+    let game_json = crucible_sim::serialize::snapshot_json(game);
+    let replay_json = replay.to_json();
+    let store = state.store.clone();
+    let key = format!("save:{seed}");
+    let opp = opponent.to_string();
+    match tokio::task::spawn_blocking(move || store.save_game(&key, &opp, &game_json, &replay_json))
+        .await
+    {
+        Ok(Ok(())) => tracing::info!("saved live match for resume (seed {seed})"),
+        Ok(Err(e)) => tracing::error!("failed to save live match: {e}"),
+        Err(e) => tracing::error!("live save task failed: {e}"),
+    }
 }
 
 /// Persist a match's replay (finished or aborted by a disconnect) off the
@@ -460,6 +687,351 @@ async fn save_replay(
     }
 }
 
+fn build_tile_inspection(game: &Game, x: u8, y: u8) -> Option<TileInspectionMsg> {
+    if x >= crucible_sim::map::MAP_SIZE as u8 || y >= crucible_sim::map::MAP_SIZE as u8 {
+        return None;
+    }
+
+    let view = game.fog_view(Player::P0);
+    let idx = tile_index(x, y);
+    let visible = view.visible[idx];
+    let explored = view.explored.get(idx).copied().unwrap_or(false);
+    let known = visible || explored;
+    let visibility = if visible {
+        "visible"
+    } else if explored {
+        "explored"
+    } else {
+        "unexplored"
+    }
+    .to_string();
+
+    let terrain = known.then(|| terrain_rule(game.map.terrain_at(x, y)));
+    let resource_kind = if known {
+        game.map
+            .resource_at(x, y)
+            .filter(|resource| visible || resource_is_known(&view, idx, *resource))
+    } else {
+        None
+    };
+    let resource = resource_kind.and_then(|resource| resource_tile(game, x, y, resource));
+
+    let mut occupants = Vec::new();
+    if known {
+        for unit in game
+            .units
+            .iter()
+            .filter(|unit| unit.is_alive() && unit.tile == (x, y))
+        {
+            if unit.owner == Player::P0 {
+                occupants.push(diff_unit(game, unit, None));
+            }
+        }
+        for building in game
+            .buildings
+            .iter()
+            .filter(|building| building.is_alive() && building.tile == (x, y))
+        {
+            if building.owner == Player::P0 {
+                occupants.push(diff_building(game, building));
+            }
+        }
+        // Enemy entities come from fog memory, never from the hidden live
+        // game. A stale occupant is useful context but has no secret HP or
+        // queue details.
+        for remembered in &view.units {
+            if remembered.tile == (x, y) {
+                occupants.push(DiffEntity {
+                    id: remembered.id,
+                    kind: unit_kind(remembered.utype),
+                    owner: 1,
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                    hp: 0,
+                    max_hp: 0,
+                    stale: Some(game.turn - remembered.last_seen),
+                    mp: None,
+                    max_mp: None,
+                    move_target: None,
+                    movement_path: None,
+                    queue: None,
+                    progress: None,
+                    build_time: None,
+                    construction_progress: None,
+                    construction_time: None,
+                });
+            }
+        }
+        for remembered in &view.buildings {
+            if remembered.tile == (x, y) {
+                occupants.push(DiffEntity {
+                    id: remembered.id,
+                    kind: building_kind(remembered.btype),
+                    owner: 1,
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                    hp: 0,
+                    max_hp: 0,
+                    stale: Some(game.turn - remembered.last_seen),
+                    mp: None,
+                    max_mp: None,
+                    move_target: None,
+                    movement_path: None,
+                    queue: None,
+                    progress: None,
+                    build_time: None,
+                    construction_progress: None,
+                    construction_time: None,
+                });
+            }
+        }
+    }
+    occupants.sort_by_key(|entity| entity.id);
+
+    let mut movement = Vec::new();
+    let mut route_targets = Vec::new();
+    if known {
+        let tile_occupied_by_building = game
+            .buildings
+            .iter()
+            .any(|building| building.is_alive() && building.tile == (x, y));
+        let tile_occupied_by_unit = game
+            .units
+            .iter()
+            .any(|unit| unit.is_alive() && unit.tile == (x, y));
+        let tile_terrain = game.map.terrain_at(x, y);
+        for unit in game
+            .units
+            .iter()
+            .filter(|unit| unit.owner == Player::P0 && unit.is_alive())
+        {
+            let dx = (unit.tile.0 as i32 - x as i32).abs();
+            let dy = (unit.tile.1 as i32 - y as i32).abs();
+            let adjacent = dx <= 1 && dy <= 1;
+            let base_cost = if dx == 0 && dy == 0 {
+                0
+            } else if adjacent && dx != 0 && dy != 0 {
+                2
+            } else if adjacent {
+                1
+            } else {
+                tile_terrain.move_mult()
+            };
+            let terrain_cost = if adjacent {
+                game.map
+                    .move_cost(unit.tile, (x, y), unit_stats(unit.utype).air)
+            } else {
+                base_cost
+                    * if unit_stats(unit.utype).air {
+                        1
+                    } else {
+                        tile_terrain.move_mult()
+                    }
+            };
+            let can_enter = tile_terrain.is_passable()
+                && (!tile_occupied_by_building || unit_stats(unit.utype).air)
+                && (!tile_occupied_by_unit || unit.tile == (x, y))
+                && (terrain_cost == 0 || terrain_cost <= unit.mp);
+            movement.push(TileMovementMsg {
+                unit_id: unit.id,
+                unit_kind: unit_kind(unit.utype),
+                move_points: unit.mp,
+                terrain_cost,
+                can_enter,
+            });
+            if let Some(target) = unit.move_target {
+                route_targets.push(RouteTargetMsg {
+                    unit_id: unit.id,
+                    target,
+                });
+            }
+        }
+    }
+
+    let occupied_by_building = game
+        .buildings
+        .iter()
+        .any(|building| building.is_alive() && building.tile == (x, y));
+    let occupied_by_unit = game
+        .units
+        .iter()
+        .any(|unit| unit.is_alive() && unit.tile == (x, y));
+    let within_base_radius = known
+        && game.buildings.iter().any(|building| {
+            building.owner == Player::P0
+                && building.is_alive()
+                && within_range(building.tile.0, building.tile.1, x, y, 5)
+        });
+    let placement = if known {
+        let passable = game.map.is_passable(x, y);
+        let no_resource = resource_kind.is_none();
+        PlacementFactsMsg {
+            known: true,
+            passable: Some(passable),
+            occupied_by_building,
+            occupied_by_unit,
+            resource: resource_kind,
+            within_base_radius,
+            structure_site_available: passable
+                && !occupied_by_building
+                && !occupied_by_unit
+                && no_resource
+                && within_base_radius,
+            refinery_site_available: passable
+                && !occupied_by_building
+                && !occupied_by_unit
+                && resource.as_ref().is_some_and(|tile| tile.amount > 0)
+                && game.can_afford(
+                    Player::P0,
+                    crucible_sim::building_stats(BuildingType::Refinery).resource_cost,
+                ),
+        }
+    } else {
+        PlacementFactsMsg {
+            known: false,
+            passable: None,
+            occupied_by_building: false,
+            occupied_by_unit: false,
+            resource: None,
+            within_base_radius: false,
+            structure_site_available: false,
+            refinery_site_available: false,
+        }
+    };
+
+    Some(TileInspectionMsg {
+        x,
+        y,
+        index: idx as u16,
+        visibility,
+        terrain,
+        elevation: known.then(|| game.map.elevation.get(idx).copied().unwrap_or(0)),
+        moisture: known.then(|| game.map.moisture.get(idx).copied().unwrap_or(0)),
+        temperature: known.then(|| game.map.temperature.get(idx).copied().unwrap_or(0)),
+        resource,
+        occupants,
+        movement,
+        route_targets,
+        placement,
+    })
+}
+
+fn resource_is_known(
+    view: &crucible_sim::fog::FogView,
+    idx: usize,
+    resource: ResourceType,
+) -> bool {
+    match resource {
+        ResourceType::Ore => view.known_ore[idx],
+        ResourceType::Steel => view.known_steel[idx],
+        ResourceType::Coal => view.known_coal[idx],
+        ResourceType::Crystal => view.known_crystal[idx],
+    }
+}
+
+fn resource_tile(game: &Game, x: u8, y: u8, resource: ResourceType) -> Option<ResourceTile> {
+    let amount = game.map.resource_amount_at(x, y);
+    let richness = game.map.resource_richness_at(x, y);
+    let refinery_owner = game
+        .buildings
+        .iter()
+        .find(|building| {
+            building.is_alive() && building.btype.is_refinery() && building.tile == (x, y)
+        })
+        .map(|building| building.owner.index() as u8);
+    let yield_per_turn = refinery_owner
+        .map(|owner| {
+            game.refinery_yield(resource, richness)
+                * game
+                    .tech_effects(if owner == 0 { Player::P0 } else { Player::P1 })
+                    .yield_num
+                / 100
+        })
+        .unwrap_or_else(|| game.refinery_yield(resource, richness));
+    Some(ResourceTile {
+        x,
+        y,
+        resource,
+        amount,
+        richness,
+        infinite: true,
+        yield_per_turn,
+        refinery_owner,
+    })
+}
+
+fn diff_unit(game: &Game, unit: &crucible_sim::Unit, stale: Option<i32>) -> DiffEntity {
+    DiffEntity {
+        id: unit.id,
+        kind: unit_kind(unit.utype),
+        owner: unit.owner.index() as u8,
+        x: unit.tile.0 as f32 + 0.5,
+        y: unit.tile.1 as f32 + 0.5,
+        hp: if stale.is_some() { 0 } else { unit.hp },
+        max_hp: if stale.is_some() { 0 } else { unit.max_hp },
+        stale,
+        mp: if stale.is_some() { None } else { Some(unit.mp) },
+        max_mp: if stale.is_some() {
+            None
+        } else {
+            Some(crucible_sim::unit_stats(unit.utype).mp)
+        },
+        move_target: if stale.is_some() {
+            None
+        } else {
+            unit.move_target
+        },
+        movement_path: if stale.is_some() {
+            None
+        } else {
+            game.movement_path(unit.id)
+        },
+        queue: None,
+        progress: None,
+        build_time: None,
+        construction_progress: None,
+        construction_time: None,
+    }
+}
+
+fn diff_building(_game: &Game, building: &crucible_sim::Building) -> DiffEntity {
+    let (queue, progress, build_time) = if building.queue.is_empty() {
+        (None, None, None)
+    } else {
+        let head = building.queue[0];
+        (
+            Some(
+                building
+                    .queue
+                    .iter()
+                    .map(|unit| format!("{unit:?}"))
+                    .collect(),
+            ),
+            Some(building.progress),
+            Some(crucible_sim::unit_stats(head).build_time_turns),
+        )
+    };
+    DiffEntity {
+        id: building.id,
+        kind: building_kind(building.btype),
+        owner: building.owner.index() as u8,
+        x: building.tile.0 as f32 + 0.5,
+        y: building.tile.1 as f32 + 0.5,
+        hp: building.hp,
+        max_hp: building.max_hp,
+        stale: None,
+        mp: None,
+        max_mp: None,
+        move_target: None,
+        movement_path: None,
+        queue,
+        progress,
+        build_time,
+        construction_progress: Some(building.construction_progress),
+        construction_time: Some(building.construction_time()),
+    }
+}
+
 fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
     let view = game.fog_view(Player::P0);
     let mut entities = Vec::new();
@@ -475,9 +1047,15 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 hp: u.hp,
                 max_hp: u.max_hp,
                 stale: None,
+                mp: Some(u.mp),
+                max_mp: Some(crucible_sim::unit_stats(u.utype).mp),
+                move_target: u.move_target,
+                movement_path: game.movement_path(u.id),
                 queue: None,
                 progress: None,
                 build_time: None,
+                construction_progress: None,
+                construction_time: None,
             });
         }
     }
@@ -502,9 +1080,15 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 hp: b.hp,
                 max_hp: b.max_hp,
                 stale: None,
+                mp: None,
+                max_mp: None,
+                move_target: None,
+                movement_path: None,
                 queue,
                 progress,
                 build_time,
+                construction_progress: Some(b.construction_progress),
+                construction_time: Some(b.construction_time()),
             });
         }
     }
@@ -519,9 +1103,15 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             hp: 0,
             max_hp: 0,
             stale: Some(game.turn - m.last_seen),
+            mp: None,
+            max_mp: None,
+            move_target: None,
+            movement_path: None,
             queue: None,
             progress: None,
             build_time: None,
+            construction_progress: None,
+            construction_time: None,
         });
     }
     for m in &view.buildings {
@@ -534,32 +1124,80 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
             hp: 0,
             max_hp: 0,
             stale: Some(game.turn - m.last_seen),
+            mp: None,
+            max_mp: None,
+            move_target: None,
+            movement_path: None,
             queue: None,
             progress: None,
             build_time: None,
+            construction_progress: None,
+            construction_time: None,
         });
     }
-
-    let mut ore_tiles = Vec::new();
-    for idx in 0..(64 * 64) {
-        if view.known_ore[idx] && game.map.ore[idx] > 0 {
-            ore_tiles.push(OreTile {
-                x: (idx % 64) as u8,
-                y: (idx / 64) as u8,
-                amount: game.map.ore[idx],
+    let mut resource_tiles = Vec::new();
+    for idx in 0..MAP_TILES {
+        let x = (idx % MAP_SIZE) as u8;
+        let y = (idx / MAP_SIZE) as u8;
+        let Some(resource) = game.map.resource_at(x, y) else {
+            continue;
+        };
+        let known = match resource {
+            ResourceType::Ore => view.known_ore[idx],
+            ResourceType::Steel => view.known_steel[idx],
+            ResourceType::Coal => view.known_coal[idx],
+            ResourceType::Crystal => view.known_crystal[idx],
+        };
+        let amount = game.map.resource_amount_at(x, y);
+        if known && game.map.has_resource_at(x, y) {
+            let richness = game.map.resource_richness_at(x, y);
+            let refinery_owner = game
+                .buildings
+                .iter()
+                .find(|building| {
+                    building.is_alive() && building.btype.is_refinery() && building.tile == (x, y)
+                })
+                .map(|building| building.owner.index() as u8);
+            let yield_per_turn = refinery_owner
+                .map(|owner| {
+                    game.refinery_yield(resource, richness)
+                        * game
+                            .tech_effects(if owner == 0 { Player::P0 } else { Player::P1 })
+                            .yield_num
+                        / 100
+                })
+                .unwrap_or_else(|| game.refinery_yield(resource, richness));
+            resource_tiles.push(ResourceTile {
+                x,
+                y,
+                resource,
+                amount,
+                richness,
+                infinite: true,
+                yield_per_turn,
+                refinery_owner,
             });
         }
     }
-    let mut crystal_tiles = Vec::new();
-    for idx in 0..(64 * 64) {
-        if view.known_crystal[idx] && game.map.crystal[idx] > 0 {
-            crystal_tiles.push(CrystalTile {
-                x: (idx % 64) as u8,
-                y: (idx / 64) as u8,
-                amount: game.map.crystal[idx],
-            });
-        }
-    }
+    // Split legacy projections for older browser builds.
+    let ore_tiles: Vec<OreTile> = resource_tiles
+        .iter()
+        .filter(|t| t.resource == ResourceType::Ore)
+        .map(|t| OreTile {
+            x: t.x,
+            y: t.y,
+            amount: t.amount,
+        })
+        .collect();
+    let crystal_tiles: Vec<CrystalTile> = resource_tiles
+        .iter()
+        .filter(|t| t.resource == ResourceType::Crystal)
+        .map(|t| CrystalTile {
+            x: t.x,
+            y: t.y,
+            amount: t.amount,
+        })
+        .collect();
 
     let visible: Vec<u16> = view
         .visible
@@ -575,11 +1213,13 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
         .filter(|e| e.turn > *last_event_turn && event_player(game, &e.kind) == Some(Player::P0))
         .map(|e| DiffEvent {
             turn: e.turn,
+            round: (e.turn + 1).div_euclid(2).max(1),
             kind: event_kind(&e.kind),
             amount: match &e.kind {
-                crucible_sim::EventKind::OreMined { amount, .. }
+                crucible_sim::EventKind::ResourceMined { amount, .. }
+                | crucible_sim::EventKind::OreMined { amount, .. }
                 | crucible_sim::EventKind::CrystalMined { amount, .. } => Some(*amount),
-                crucible_sim::EventKind::Sold { refund, .. } => Some(*refund),
+                crucible_sim::EventKind::Sold { refund, .. } => Some(refund.total_value()),
                 _ => None,
             },
             player: event_player(game, &e.kind).map(|player| player.index() as u8),
@@ -591,9 +1231,14 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
     let research = &game.research[0];
     ServerMsg::StateDiff(StateDiffMsg {
         turn: game.turn,
+        round: game.round,
         active_player: game.active.index() as u8,
         ore: game.ore[0],
         crystal: game.crystal[0],
+        steel: game.steel[0],
+        coal: game.coal[0],
+        resources: game.resources(Player::P0),
+        income: game.resource_income(Player::P0),
         power_produced,
         power_consumed,
         research: ResearchMsg {
@@ -606,10 +1251,13 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 .collect(),
         },
         entities,
+        resource_tiles,
         ore_tiles,
         crystal_tiles,
         visible,
         events,
+        actions_spent: Some(game.budgets[0].spent()),
+        actions_cap: Some(game.budgets[0].cap()),
     })
 }
 
@@ -620,6 +1268,7 @@ fn event_player(game: &Game, event: &crucible_sim::EventKind) -> Option<Player> 
     match event {
         crucible_sim::EventKind::BuildingPlaced { player, .. }
         | crucible_sim::EventKind::UnitTrained { player, .. }
+        | crucible_sim::EventKind::ResourceMined { player, .. }
         | crucible_sim::EventKind::OreMined { player, .. }
         | crucible_sim::EventKind::CrystalMined { player, .. }
         | crucible_sim::EventKind::ResearchStarted { player, .. }
@@ -643,7 +1292,9 @@ fn command_batch_is_bounded(cmds: &[Command]) -> bool {
         // `Attack` carries a unit group too — bound it identically so a
         // malformed batch can't smuggle an oversized id list past the cap.
         let unit_ids = match cmd {
-            Command::MoveGroup { units, .. } | Command::Attack { units, .. } => units,
+            Command::MoveGroup { units, .. }
+            | Command::ClearMove { units, .. }
+            | Command::Attack { units, .. } => units,
             _ => continue,
         };
         if unit_ids.len() > MAX_MOVE_GROUP_UNITS {
@@ -655,6 +1306,21 @@ fn command_batch_is_bounded(cmds: &[Command]) -> bool {
         }
     }
     true
+}
+
+fn terrain_rule(terrain: Terrain) -> TerrainRuleMsg {
+    TerrainRuleMsg {
+        kind: format!("{terrain:?}"),
+        label: terrain.label().to_string(),
+        passable: terrain.is_passable(),
+        move_multiplier: terrain.move_mult(),
+        defense_reduction: terrain.defense_reduction(),
+        tactical_tag: terrain.tactical_tag().to_string(),
+    }
+}
+
+fn terrain_rules() -> Vec<TerrainRuleMsg> {
+    Terrain::ALL.into_iter().map(terrain_rule).collect()
 }
 
 fn unit_kind(u: UnitType) -> String {
@@ -674,6 +1340,9 @@ fn event_kind(e: &crucible_sim::EventKind) -> String {
         }
         crucible_sim::EventKind::UnitDied { .. } => "unit_died".into(),
         crucible_sim::EventKind::BuildingDestroyed { .. } => "building_destroyed".into(),
+        crucible_sim::EventKind::ResourceMined { resource, .. } => {
+            format!("mined:{resource:?}").to_lowercase()
+        }
         crucible_sim::EventKind::OreMined { .. } => "ore_mined".into(),
         crucible_sim::EventKind::CrystalMined { .. } => "crystal_mined".into(),
         crucible_sim::EventKind::BuildingPlaced { btype, .. } => {
