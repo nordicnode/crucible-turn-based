@@ -53,9 +53,13 @@ function tileHash(tx: number, ty: number): number {
   return (h ^ (h >> 16)) >>> 0;
 }
 
-/** Deterministic micro-position within a tile for per-tile detail placement. */
+/** Deterministic micro-position within a tile for per-tile detail placement.
+ *  Returns a value in [0, span) that scales *proportionally* with `span`, so a
+ *  decoration keeps the same relative position in its tile at every zoom level.
+ *  A plain `% span` here would snap to a different pixel offset every time the
+ *  tile size (zoom) changes, making grass/flowers/rocks appear to slide around. */
 function detPos(h: number, i: number, span: number): number {
-  return ((h >>> (i * 7)) % Math.max(1, Math.floor(span)));
+  return ((h >>> (i * 7)) % 1000) * span / 1000;
 }
 
 /** A filled circle, integer-snapped, deterministic per tile. */
@@ -89,7 +93,7 @@ function pTri(
   ctx.fill();
 }
 
-/** A short grass tuft: two blades with a highlight. */
+/** A fanned multi-blade grass tuft with root shadow, curved blades, and lit tips. */
 function pGrassTuft(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
@@ -98,9 +102,24 @@ function pGrassTuft(
   dark: string,
 ): void {
   const bw = Math.max(1, Math.floor(w));
-  const bh = Math.max(2, Math.floor(h));
-  pRect(ctx, x, y, bw, bh, dark);
-  pRect(ctx, x + bw + Math.max(1, bw / 2), y, bw, Math.max(2, bh - 1), light);
+  const bh = Math.max(3, Math.floor(h));
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+
+  // Root anchor shadow in soil
+  pRect(ctx, ix - bw, iy + bh - 1, bw * 3, 1, dark);
+
+  // Left blade: angled outward to the left with lit tip
+  pRect(ctx, ix - bw, iy + Math.floor(bh * 0.4), bw, Math.max(1, Math.floor(bh * 0.5)), dark);
+  pRect(ctx, ix - bw * 2, iy + Math.floor(bh * 0.2), bw, Math.max(1, Math.floor(bh * 0.3)), light);
+
+  // Center blade: tallest, straight with bright NW highlight tip
+  pRect(ctx, ix, iy + Math.floor(bh * 0.25), bw, Math.max(2, Math.floor(bh * 0.7)), dark);
+  pRect(ctx, ix, iy, bw, Math.max(1, Math.floor(bh * 0.35)), light);
+
+  // Right blade: angled outward to the right
+  pRect(ctx, ix + bw, iy + Math.floor(bh * 0.45), bw, Math.max(1, Math.floor(bh * 0.45)), dark);
+  pRect(ctx, ix + bw * 2, iy + Math.floor(bh * 0.3), bw, Math.max(1, Math.floor(bh * 0.25)), light);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,65 +180,99 @@ export function drawPassableTile(
   const h = tileHash(tx, ty);
 
   if (isExploredOnly) {
-    pRect(ctx, px, py, size, size, "#09100c");
-    pStroke(ctx, px, py, size, size, "#040705");
+    pRect(ctx, px, py, size, size, "#08100a");
+    pStroke(ctx, px, py, size, size, "#030704");
     return;
   }
 
-  // Multi-tone lush grassland with rich micro-texture
-  const bases = ["#4e7a36", "#56843c", "#477030", "#5c8c42"];
+  // 1. Multi-tone natural grassland with muted, grounded earthy greens
+  const bases = ["#3d5c2a", "#466631", "#385226", "#41602e"];
   pRect(ctx, px, py, size, size, bases[h % 4]);
-  // Sunlit north-west corner, shadowed south-east corner for gentle elevation
-  pRect(ctx, px, py, size, Math.max(1, size * 0.12), "rgba(255,255,255,0.12)");
-  pRect(ctx, px, py, Math.max(1, size * 0.12), size, "rgba(255,255,255,0.08)");
-  pRect(ctx, px, py + size - Math.max(1, size * 0.12), size, Math.max(1, size * 0.12), "rgba(0,0,0,0.12)");
-  pRect(ctx, px + size - Math.max(1, size * 0.12), py, Math.max(1, size * 0.12), size, "rgba(0,0,0,0.08)");
-  pStroke(ctx, px, py, size, size, "rgba(24,46,18,0.30)");
+
+  // 2. Soft, organic ambient lighting: subtle NW daylight sheen and SE turf shade.
+  // Kept soft and narrow so contiguous grass tiles merge into a seamless rolling meadow.
+  pRect(ctx, px, py, size, Math.max(1, Math.floor(size * 0.06)), "rgba(255,255,255,0.06)");
+  pRect(ctx, px, py, Math.max(1, Math.floor(size * 0.06)), size, "rgba(255,255,255,0.04)");
+  pRect(ctx, px, py + size - Math.max(1, Math.floor(size * 0.06)), size, Math.max(1, Math.floor(size * 0.06)), "rgba(0,0,0,0.08)");
+  pRect(ctx, px + size - Math.max(1, Math.floor(size * 0.06)), py, Math.max(1, Math.floor(size * 0.06)), size, "rgba(0,0,0,0.05)");
+  pStroke(ctx, px, py, size, size, "rgba(16,32,12,0.18)");
 
   if (size >= 7) {
-    // Multi-blade grass tufts scattered deterministically
+    // 3. Fine turf micro-texture & lawn blade stippling (organic green-on-green noise)
+    const stippleCount = 3 + (h % 4);
+    for (let s = 0; s < stippleCount; s++) {
+      const sx = px + 2 + detPos(h, s * 3 + 1, size - 4);
+      const sy = py + 2 + detPos(h, s * 3 + 2, size - 4);
+      const stippleColor = s % 2 === 0 ? "#56793a" : "#243818";
+      pRect(ctx, sx, sy, 1, 1, stippleColor);
+      if (size >= 16 && s % 2 === 0) {
+        // Micro-blade vertical tick
+        pRect(ctx, sx, sy - 1, 1, 1, "#6a9048");
+      }
+    }
+
+    // 4. Expressive multi-blade grass tufts scattered deterministically
     const tuftCount = 2 + (h % 3);
     for (let i = 0; i < tuftCount; i++) {
-      const gx = px + detPos(h, i * 2, size - 8);
-      const gy = py + detPos(h, i * 2 + 3, size - 6);
-      pGrassTuft(ctx, gx, gy, Math.max(1, size * 0.05), Math.max(2, size * 0.14), "#8ec460", "#385223");
+      const gx = px + 3 + detPos(h, i * 2, size - 8);
+      const gy = py + 3 + detPos(h, i * 2 + 3, size - 8);
+      const tuftW = Math.max(1, size * 0.04);
+      const tuftH = Math.max(3, size * 0.14);
+      const lightCol = (h + i) % 2 === 0 ? "#688e49" : "#5a7e3d";
+      const darkCol = (h + i) % 2 === 0 ? "#1a2c12" : "#223617";
+      pGrassTuft(ctx, gx, gy, tuftW, tuftH, lightCol, darkCol);
     }
 
-    // Deterministic colorful wildflowers & clover
-    const flowerType = h % 4;
-    const fx1 = px + detPos(h, 5, size - 4);
-    const fy1 = py + detPos(h, 6, size - 4);
-    const fx2 = px + detPos(h, 7, size - 4);
-    const fy2 = py + detPos(h, 8, size - 4);
+    // 5. Special feature per tile: Clover clump, delicate wildflower, or earth stone
+    const featureType = h % 4;
 
-    if (flowerType === 0) {
-      // Golden buttercups
-      pRect(ctx, fx1, fy1, 2, 2, "#facc15");
-      pRect(ctx, fx1, fy1 + 1, 1, 1, "#ca8a04");
-      pRect(ctx, fx2, fy2, 1, 1, "#fef08a");
-    } else if (flowerType === 1) {
-      // Crimson field poppies
-      pRect(ctx, fx1, fy1, 2, 2, "#ef4444");
-      pRect(ctx, fx1 + 1, fy1, 1, 1, "#fca5a5");
-      pRect(ctx, fx2, fy2, 1, 1, "#dc2626");
-    } else if (flowerType === 2) {
-      // Soft lavender clover blossoms
-      pRect(ctx, fx1, fy1, 2, 2, "#c084fc");
-      pRect(ctx, fx1, fy1, 1, 1, "#e9d5ff");
-      pRect(ctx, fx2, fy2, 1, 1, "#a855f7");
-    } else {
-      // White meadow daisies with yellow eye
-      pRect(ctx, fx1, fy1, 2, 2, "#f8fafc");
-      pRect(ctx, fx1 + 1, fy1, 1, 1, "#eab308");
-      pRect(ctx, fx2, fy2, 1, 1, "#f1f5f9");
-    }
+    if (featureType === 0) {
+      // Small 3-leaf clover clump
+      const clx = px + 3 + detPos(h, 7, size - 8);
+      const cly = py + 3 + detPos(h, 8, size - 8);
+      pRect(ctx, clx, cly, 2, 2, "#2b441c");
+      pRect(ctx, clx + 2, cly + 1, 2, 2, "#324e22");
+      pRect(ctx, clx + 1, cly - 1, 2, 2, "#3a5828");
+      pRect(ctx, clx + 1, cly, 1, 1, "#5a803e");
+    } else if (featureType === 1) {
+      // Delicate meadow wildflower nestled in grass (single subtle bloom with stem)
+      const flowerSub = (h >> 2) % 4;
+      const fx = px + 3 + detPos(h, 5, size - 8);
+      const fy = py + 3 + detPos(h, 6, size - 8);
 
-    // Small earth pebble
-    if (size >= 12 && h % 3 === 0) {
+      // Green flower stem
+      pRect(ctx, fx, fy + 2, 1, 2, "#223618");
+
+      if (flowerSub === 0) {
+        // Golden buttercup
+        pRect(ctx, fx, fy, 2, 2, "#eab308");
+        pRect(ctx, fx + 1, fy + 1, 1, 1, "#ca8a04");
+      } else if (flowerSub === 1) {
+        // Wild white meadow daisy
+        pRect(ctx, fx, fy, 2, 2, "#f1f5f9");
+        pRect(ctx, fx + 1, fy + 1, 1, 1, "#d97706");
+      } else if (flowerSub === 2) {
+        // Alpine forget-me-not (sky blue)
+        pRect(ctx, fx, fy, 2, 2, "#60a5fa");
+        pRect(ctx, fx, fy + 1, 1, 1, "#3b82f6");
+      } else {
+        // Meadow poppy (soft crimson)
+        pRect(ctx, fx, fy, 2, 2, "#dc2626");
+        pRect(ctx, fx + 1, fy + 1, 1, 1, "#991b1b");
+      }
+    } else if (featureType === 2 && size >= 12) {
+      // Natural weathered loam pebble
       const rx = px + size * 0.65;
-      const ry = py + size * 0.75;
-      pRect(ctx, rx, ry, 2, 2, "#8b7e66");
-      pRect(ctx, rx, ry + 1, 2, 1, "#544c3c");
+      const ry = py + size * 0.72;
+      pRect(ctx, rx, ry, 2, 2, "#746850");
+      pRect(ctx, rx, ry + 1, 2, 1, "#443a2b");
+    } else {
+      // Extra blade cluster for lush grass variety
+      const ex = px + 3 + detPos(h, 9, size - 8);
+      const ey = py + 3 + detPos(h, 10, size - 8);
+      pRect(ctx, ex, ey, 1, Math.max(2, Math.floor(size * 0.10)), "#253a1a");
+      pRect(ctx, ex, ey - 1, 1, 1, "#658a47");
+      pRect(ctx, ex + 1, ey, 1, Math.max(2, Math.floor(size * 0.08)), "#567c3b");
     }
   }
 }
