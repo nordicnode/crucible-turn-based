@@ -202,6 +202,13 @@ pub enum EventKind {
         damage: i32,
         /// Whether the defender's counterattack also resolved.
         countered: bool,
+        /// Owners captured at resolution time. A killing blow's target is swept
+        /// from the world before the diff is built, so storing the owners here
+        /// is what lets the client still know which side the fight hit.
+        #[serde(default)]
+        attacker_owner: Option<Player>,
+        #[serde(default)]
+        target_owner: Option<Player>,
     },
     Sold {
         player: Player,
@@ -1063,6 +1070,9 @@ impl Game {
                     let drange = self.effective_range(d.utype, d.owner);
                     let dd = crate::tiles::chebyshev(d.tile.0, d.tile.1, tile.0, tile.1);
                     if dd <= drange && dd >= dstats.min_range_tiles {
+                        // Capture the defender's owner before any mutable calls
+                        // (NLL: `d`'s borrow ends once these reads are done).
+                        let defender_owner = d.owner;
                         let mut cdmg = self.effective_damage(d.utype, d.owner, d.hp);
                         // The attacker is air and the defender lacks AA: half.
                         if stats.air && !dstats.aa {
@@ -1071,6 +1081,17 @@ impl Game {
                         cdmg = self.apply_terrain_defense(cdmg, tile);
                         self.apply_damage(id, cdmg);
                         countered = true;
+                        // Represent the counterattack as its own shot so the
+                        // client visibly plays the defender firing back, not
+                        // just the primary hit.
+                        self.push_event(EventKind::Attacked {
+                            attacker: target,
+                            target: id,
+                            damage: cdmg,
+                            countered: false,
+                            attacker_owner: Some(defender_owner),
+                            target_owner: Some(owner),
+                        });
                     }
                 }
             }
@@ -1083,6 +1104,8 @@ impl Game {
                 target,
                 damage: dmg,
                 countered,
+                attacker_owner: Some(owner),
+                target_owner: Some(enemy),
             });
             let _ = max_hp;
         }
@@ -1233,6 +1256,8 @@ impl Game {
                     target: victim,
                     damage: dmg,
                     countered: false,
+                    attacker_owner: Some(finished),
+                    target_owner: Some(finished.enemy()),
                 });
             }
         }

@@ -130,6 +130,10 @@ function onServerMsg(msg: ServerMsg): void {
   switch (msg.type) {
     case "matchStart": {
       inGame = true;
+      // Discard any combat still queued from a previous match so stale attacks
+      // (resolved against the fresh match's unrelated entities) never replay.
+      combatQueue.length = 0;
+      nextAttackAt = 0;
       world.setMap(
         msg.mapSeed,
         msg.passable,
@@ -267,6 +271,10 @@ function onServerMsg(msg: ServerMsg): void {
     }
     case "matchEnd": {
       inGame = false;
+      // Stop replaying the old match's combat once it's over; the next match
+      // starts clean (see matchStart).
+      combatQueue.length = 0;
+      nextAttackAt = 0;
       world.result = { winner: msg.winner, reason: msg.reason };
       lastReplayId = msg.replayId ?? null;
       // F4: feed the adaptive-difficulty tracker (draws are neutral).

@@ -1352,16 +1352,26 @@ fn event_player(game: &Game, event: &crucible_sim::EventKind) -> Option<Player> 
         crucible_sim::EventKind::UnitDied { owner, .. }
         | crucible_sim::EventKind::BuildingDestroyed { owner, .. } => Some(*owner),
         crucible_sim::EventKind::Attacked {
-            attacker, target, ..
+            attacker,
+            target,
+            attacker_owner: stored_attacker_owner,
+            target_owner: stored_target_owner,
+            ..
         } => {
-            let attacker_owner = game
-                .any_unit(*attacker)
-                .map(|u| u.owner)
-                .or_else(|| game.any_building(*attacker).map(|b| b.owner));
-            let target_owner = game
-                .any_unit(*target)
-                .map(|u| u.owner)
-                .or_else(|| game.any_building(*target).map(|b| b.owner));
+            // Prefer the owners captured at resolution time: a killing blow's
+            // target is swept from the world before the diff is built, so the
+            // live lookup below can't tell which side it was. Fall back for
+            // events serialized before the owner fields existed.
+            let attacker_owner = stored_attacker_owner.or_else(|| {
+                game.any_unit(*attacker)
+                    .map(|u| u.owner)
+                    .or_else(|| game.any_building(*attacker).map(|b| b.owner))
+            });
+            let target_owner = stored_target_owner.or_else(|| {
+                game.any_unit(*target)
+                    .map(|u| u.owner)
+                    .or_else(|| game.any_building(*target).map(|b| b.owner))
+            });
             // Deliver a combat event to a player whenever *either* side is
             // theirs, so the client can animate both outgoing and incoming fire.
             match (attacker_owner, target_owner) {
