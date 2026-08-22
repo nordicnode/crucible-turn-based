@@ -91,6 +91,21 @@ export class FXEngine {
   private nextProjId = 1;
   private lastVehiclePos = new Map<number, { x: number; y: number; angle: number }>();
   private lastUnitFired = new Map<number, number>();
+  /** Entity ids that just took a hit (tick -> recent-hit flash). */
+  private lastEntityHit = new Map<number, number>();
+
+  /** Record that an entity was just damaged in combat (victim hit flash). */
+  recordHit(id: number, tick: number): void {
+    this.lastEntityHit.set(id, tick);
+  }
+
+  /** Ticks since this entity was last hit (or -1 if not recently). */
+  getHitAge(id: number, currentTick: number): number {
+    const t = this.lastEntityHit.get(id);
+    if (t == null) return -1;
+    const diff = currentTick - t;
+    return diff >= 0 && diff <= 10 ? diff : -1;
+  }
 
   /** Record that an entity just fired a weapon at a tick */
   recordUnitFiring(id: number, tick: number): void {
@@ -245,6 +260,7 @@ export class FXEngine {
       arcHeight: kind === "artillery" ? Math.min(3.5, dist * 0.4) : 0,
       color,
     });
+    if (this.projectiles.length > 120) this.projectiles.shift();
 
     // Muzzle flash at origin
     this.spawnMuzzleFlash(fromX, fromY, color);

@@ -67,6 +67,19 @@ let demoTime = 0;
 
 let inGame = false;
 let selection = new Set<number>();
+
+/** One authoritative attack buffered for cinematic one-at-a-time playback. */
+interface QueuedAttack {
+  attackerId: number;
+  targetId: number;
+  kind: "bullet" | "shell" | "artillery" | "laser";
+  color: string;
+}
+// Attacks delivered in a diff are replayed one at a time (never all in one
+// frame) so an enemy turn's combat is never missed, and the camera focuses on
+// each one. `nextAttackAt` paces the queue off `performance.now()`.
+const combatQueue: QueuedAttack[] = [];
+let nextAttackAt = 0;
 let placementMode: BuildingType | null = null;
 let placementCursor: [number, number] | null = null;
 let selectedTile: [number, number] | null = null;
@@ -177,29 +190,10 @@ function onServerMsg(msg: ServerMsg): void {
           fx.spawnFloatingText(e.x, e.y, `-${dmg}`, dmgColor);
           // Check for under-attack alert if friendly
           intel.processUnderAttack(msg.turn, e);
-
-          // Entity took damage: find the *nearest* attacking enemy in range
-          // (iteration order is not distance order), so the muzzle flash and
-          // impact line point at the actual shooter rather than an arbitrary
-          // nearby enemy.
-          let attacker: Entity | null = null;
-          let bestD = Infinity;
-          for (const other of world.entities.values()) {
-            if (other.owner === e.owner) continue;
-            const d = Math.hypot(other.x - e.x, other.y - e.y);
-            if (d <= 6.5 && d < bestD) {
-              bestD = d;
-              attacker = other;
-            }
-          }
-          if (attacker) {
-            const kind = attacker.kind === "Artillery" ? "artillery" : attacker.kind === "Tank" ? "shell" : attacker.kind === "Turret" ? "laser" : "bullet";
-            const color = attacker.owner === 0 ? "#7899a2" : "#b86d5d";
-            fx.spawnAttack(attacker.x, attacker.y, e.x, e.y, kind, color);
-            fx.recordUnitFiring(attacker.id, animClock());
-          } else {
-            fx.spawnImpactSparks(e.x, e.y, "#d6b44f");
-          }
+          // Impact sparks on the victim. The authoritative projectile + muzzle
+          // flash + shooter recoil are drawn from the server's `attacked`
+          // events below (the projectiles carry real attacker/target ids).
+          fx.spawnImpactSparks(e.x, e.y, e.owner === 0 ? "#f87171" : "#fb923c");
         }
         prevEntityHp.set(e.id, e.hp);
       }
@@ -253,6 +247,20 @@ function onServerMsg(msg: ServerMsg): void {
 
       for (const ev of msg.events) {
         intel.processDiffEvent(ev);
+        // Authoritative combat: buffer each attack so it can be replayed one at
+        // a time with camera focus (never all in a single frame), instead of
+        // spawning a pile of projectiles that are instantly missed.
+        if (ev.kind !== "attacked" || ev.attacker == null || ev.target == null) continue;
+        const attacker = world.entities.get(ev.attacker);
+        const target = world.entities.get(ev.target);
+        if (!attacker || !target) continue;
+        combatQueue.push({
+          attackerId: ev.attacker,
+          targetId: ev.target,
+          kind: combatAttackKind(attacker.kind),
+          // Friendly fire reads teal (you attacking), incoming fire orange.
+          color: attacker.owner === 0 ? "#9be8c9" : "#ffb35c",
+        });
       }
       renderTurnIndicator();
       break;
@@ -734,6 +742,63 @@ function clearSelection(): void {
   renderTileInspector();
   lastPanelSig = "";
   renderCommandSidebar();
+}
+
+/** Map an attacking entity's kind to its projectile type for attack FX. */
+function combatAttackKind(kind: string): "bullet" | "shell" | "artillery" | "laser" {
+  switch (kind) {
+    case "Artillery":
+      return "artillery";
+    case "Tank":
+    case "MammothTank":
+      return "shell";
+    case "Turret":
+    case "TeslaCoil":
+      return "laser";
+    default:
+      return "bullet";
+  }
+}
+
+/** Play one queued attack: spawn the projectile + recoil + victim flash and
+ *  bring the combat into view. Then pace the next one. */
+function playCombatAttack(a: QueuedAttack): void {
+  const attacker = world.entities.get(a.attackerId);
+  const target = world.entities.get(a.targetId);
+  if (attacker && target) {
+    fx.spawnAttack(attacker.x, attacker.y, target.x, target.y, a.kind, a.color);
+    fx.recordUnitFiring(a.attackerId, animClock());
+    fx.recordHit(a.targetId, animClock());
+    focusCombatCamera(attacker.x, attacker.y, target.x, target.y);
+  }
+  // Pace the next attack off the projectile travel time + a short beat so the
+  // impact is readable and consecutive hits don't stack into one frame.
+  const base = a.kind === "artillery" ? 8 : a.kind === "shell" ? 14 : a.kind === "laser" ? 30 : 18;
+  const dist = attacker && target ? Math.hypot(target.x - attacker.x, target.y - attacker.y) : 6;
+  const travelMs = Math.max(0.4, dist / Math.max(1, base) + 0.3) * 1000;
+  nextAttackAt = performance.now() + travelMs;
+}
+
+/** Center the camera on combat, but only if the fight is off-screen — an
+ *  already-visible battle shouldn't yank the view around. */
+function focusCombatCamera(ax: number, ay: number, tx: number, ty: number): void {
+  const mx = (ax + tx) / 2;
+  const my = (ay + ty) / 2;
+  const cam = renderer.camera;
+  const vx0 = cam.worldX(0);
+  const vy0 = cam.worldY(0);
+  const vx1 = cam.worldX(canvas.width);
+  const vy1 = cam.worldY(canvas.height);
+  const pad = 1.5;
+  if (
+    mx >= vx0 - pad &&
+    mx <= vx1 + pad &&
+    my >= vy0 - pad &&
+    my <= vy1 + pad
+  ) {
+    return;
+  }
+  cam.centerOn(mx, my, canvas.width, canvas.height);
 }
 
 canvas.addEventListener("wheel", (ev) => {
@@ -2098,6 +2163,13 @@ function frame(ts: number): void {
     if (keysPressed.has("KeyS") || keysPressed.has("ArrowDown")) renderer.camera.pan(0, -panSpeed, canvas.width, canvas.height);
     if (keysPressed.has("KeyA") || keysPressed.has("ArrowLeft")) renderer.camera.pan(panSpeed, 0, canvas.width, canvas.height);
     if (keysPressed.has("KeyD") || keysPressed.has("ArrowRight")) renderer.camera.pan(-panSpeed, 0, canvas.width, canvas.height);
+
+    // Replay queued combat one attack at a time (never all in one frame) and
+    // focus the camera on each, so an enemy turn's attacks are never missed.
+    if (combatQueue.length > 0 && performance.now() >= nextAttackAt) {
+      const atk = combatQueue.shift();
+      if (atk) playCombatAttack(atk);
+    }
   }
 
   ctx.fillStyle = "#04060a";

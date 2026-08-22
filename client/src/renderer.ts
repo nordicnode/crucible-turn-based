@@ -519,6 +519,20 @@ export class Renderer {
       );
     }
 
+    // Just-taken hit: a quick white/red flash + border so incoming fire reads
+    // clearly on the victim even when the projectile is off-screen.
+    const hitAge = fx.getHitAge(e.id, animClock());
+    if (hitAge >= 0 && hitAge <= 4) {
+      const hitFrac = 1 - hitAge / 4; // 1 -> 0
+      const hitA = hitFrac * 0.5;
+      const half = z * 0.95;
+      ctx.fillStyle = `rgba(255, 236, 236, ${hitA})`;
+      ctx.fillRect(px - half / 2, py - half / 2, half, half);
+      ctx.strokeStyle = `rgba(248, 113, 113, ${Math.min(1, hitA + 0.35)})`;
+      ctx.lineWidth = Math.max(1.5, z * 0.07);
+      ctx.strokeRect(px - half / 2, py - half / 2, half, half);
+    }
+
     if (isSelected) {
       const reticleSize = isUnit(e) ? z * 0.9 : z * 1.15;
       drawSelectionReticle(ctx, px, py, reticleSize, animClock());

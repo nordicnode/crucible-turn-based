@@ -321,10 +321,17 @@ struct DiffEvent {
     turn: i32,
     round: i32,
     kind: String,
-    /// Amount for `ore_mined` / `sold` events (null otherwise) — lets the
-    /// client show per-turn income, since refineries bank passively.
+    /// Amount for a `mined` / `sold` / `attacked` event (null otherwise) —
+    /// lets the client show per-turn income and authoritative damage numbers.
     #[serde(skip_serializing_if = "Option::is_none")]
     amount: Option<i32>,
+    /// Attacker entity id for `attacked` events, so the client can animate the
+    /// projectile from the real shooter (not a nearest-enemy guess).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attacker: Option<u32>,
+    /// Target entity id for `attacked` events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<u32>,
     /// Index of the player associated with this event (0 = P0, 1 = P1).
     #[serde(skip_serializing_if = "Option::is_none")]
     player: Option<u8>,
@@ -1279,6 +1286,15 @@ fn build_diff(game: &Game, last_event_turn: &mut i32) -> ServerMsg {
                 | crucible_sim::EventKind::OreMined { amount, .. }
                 | crucible_sim::EventKind::CrystalMined { amount, .. } => Some(*amount),
                 crucible_sim::EventKind::Sold { refund, .. } => Some(refund.total_value()),
+                crucible_sim::EventKind::Attacked { damage, .. } => Some(*damage),
+                _ => None,
+            },
+            attacker: match &e.kind {
+                crucible_sim::EventKind::Attacked { attacker, .. } => Some(*attacker),
+                _ => None,
+            },
+            target: match &e.kind {
+                crucible_sim::EventKind::Attacked { target, .. } => Some(*target),
                 _ => None,
             },
             player: event_player(game, &e.kind).map(|player| player.index() as u8),
@@ -1335,10 +1351,24 @@ fn event_player(game: &Game, event: &crucible_sim::EventKind) -> Option<Player> 
         | crucible_sim::EventKind::Sold { player, .. } => Some(*player),
         crucible_sim::EventKind::UnitDied { owner, .. }
         | crucible_sim::EventKind::BuildingDestroyed { owner, .. } => Some(*owner),
-        crucible_sim::EventKind::Attacked { target, .. } => game
-            .any_unit(*target)
-            .map(|u| u.owner)
-            .or_else(|| game.any_building(*target).map(|b| b.owner)),
+        crucible_sim::EventKind::Attacked {
+            attacker, target, ..
+        } => {
+            let attacker_owner = game
+                .any_unit(*attacker)
+                .map(|u| u.owner)
+                .or_else(|| game.any_building(*attacker).map(|b| b.owner));
+            let target_owner = game
+                .any_unit(*target)
+                .map(|u| u.owner)
+                .or_else(|| game.any_building(*target).map(|b| b.owner));
+            // Deliver a combat event to a player whenever *either* side is
+            // theirs, so the client can animate both outgoing and incoming fire.
+            match (attacker_owner, target_owner) {
+                (Some(Player::P0), _) | (_, Some(Player::P0)) => Some(Player::P0),
+                (a, t) => a.or(t),
+            }
+        }
     }
 }
 

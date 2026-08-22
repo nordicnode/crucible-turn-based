@@ -259,8 +259,12 @@ export interface DiffEvent {
   /** Player-facing round containing the event, when supplied by v6 servers. */
   round?: number;
   kind: string;
-  /** Amount for a mined or sold event (undefined otherwise). */
+  /** Amount for a mined / sold / attacked event (undefined otherwise). */
   amount?: number;
+  /** Attacker entity id for `attacked` events (authoritative shooter). */
+  attacker?: number;
+  /** Target entity id for `attacked` events. */
+  target?: number;
   /** Resource name for generic mining events, when present. */
   resource?: ResourceType;
   /** Player index (0 = P0/friendly, 1 = P1/enemy). */
