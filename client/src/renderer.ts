@@ -234,9 +234,14 @@ export class Renderer {
         const isExp = world.explored.has(idx);
         if (!isVis && !isExp) continue;
 
-        const px = cam.screenX(tx);
-        const py = cam.screenY(ty);
-        const size = cam.zoom + 0.5;
+        // Snap tile origins to whole pixels with an integer tile size, so the
+        // entire grid — and every detail anchored inside it — lands on a stable
+        // pixel lattice. Fractional origins (fractional `cx`/`zoom`) would let
+        // `pRect`'s Math.floor re-snap each tile's details to different pixels
+        // as you zoom, making the texture appear to slide/swim.
+        const px = Math.round(cam.screenX(tx));
+        const py = Math.round(cam.screenY(ty));
+        const size = Math.max(1, Math.round(cam.zoom));
         const terrain = world.terrain.length > 0 ? world.terrain[idx] : undefined;
         const isPassable = world.passable[idx] ?? true;
 
@@ -284,11 +289,11 @@ export class Renderer {
     if (opts.selectedTile) {
       const [tx, ty] = opts.selectedTile;
       if (tx >= 0 && tx < MAP && ty >= 0 && ty < MAP) {
-        const px = cam.screenX(tx);
-        const py = cam.screenY(ty);
+        const px = Math.round(cam.screenX(tx));
+        const py = Math.round(cam.screenY(ty));
         ctx.save();
         ctx.fillStyle = "rgba(255, 226, 122, 0.08)";
-        ctx.fillRect(px, py, cam.zoom, cam.zoom);
+        ctx.fillRect(px, py, Math.round(cam.zoom), Math.round(cam.zoom));
         ctx.strokeStyle = "rgba(255, 226, 122, 0.95)";
         ctx.lineWidth = 2;
         ctx.strokeRect(Math.floor(px) + 1, Math.floor(py) + 1, Math.floor(cam.zoom) - 2, Math.floor(cam.zoom) - 2);
