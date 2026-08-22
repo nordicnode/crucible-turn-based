@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crucible_ai::{drive_bot_turn, easy, hard, medium, Bot, GenomeBot};
+use crucible_ai::{drive_bot_turn, adaptive, easy, hard, medium, Bot, GenomeBot};
 use crucible_sim::{
     entity::{BuildingType, ResourceBundle, ResourceType},
     map::{tile_index, Terrain, MAP_SIZE, MAP_TILES},
@@ -1479,7 +1479,15 @@ fn resolve_opponent(store: &Store, opponent: &str) -> Box<dyn Bot> {
         "easy" => return Box::new(easy()),
         "medium" => return Box::new(medium()),
         "hard" => return Box::new(hard()),
+        "adaptive" => return Box::new(adaptive(0.55)),
         _ => {}
+    }
+
+    // The single adaptive commander at an explicit difficulty: `adaptive:0.73`.
+    if let Some(scalar) = opponent.strip_prefix("adaptive:") {
+        if let Ok(d) = scalar.parse::<f32>() {
+            return Box::new(adaptive(d));
+        }
     }
 
     let genome_id = if opponent == "champion" {

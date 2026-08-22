@@ -1,5 +1,20 @@
-//! Deterministic scripted baseline bots: easy (turtle), medium (periodic
-//! attack waves), hard (expand-and-push).
+//! The unified, difficulty-parameterized scripted commander: `AdaptiveBot`.
+//!
+//! The menu used to expose **three separate hand-written bots** (`easy`,
+//! `medium`, `hard`) plus a client-side "adaptive" hack that just re-picked
+//! one of them. All three were, in practice, the *same engine* — shared
+//! economy opener, marching/attack code, research helper and batch ledger —
+//! parameterized by a handful of hand-tuned dials. That duplication is now
+//! collapsed into a **single `AdaptiveBot { difficulty }`** whose behavior is
+//! a pure function of a difficulty scalar in `0..=1`.
+//!
+//! The three historical tiers are kept as *anchor policies* (data, not code):
+//! `easy = AdaptiveBot::new(0.15)` (defensive turtle), `medium =
+//! AdaptiveBot::new(0.5)` (continuous infantry pressure), `hard =
+//! AdaptiveBot::new(0.9)` (expand-and-push with the full tech tree). The
+//! trainer, curriculum, balance baseline, gauntlet, and `bots.rs` all construct
+//! these via the unchanged `easy()`/`medium()`/`hard()` constructors, so
+//! behavior at the anchor difficulties is byte-identical to the old bots.
 //!
 //! These are **oracle baselines**: they may read the full [`Game`] (see
 //! `CONTRACT.md` §5). They exist to bootstrap training, seed the gauntlet
@@ -212,18 +227,10 @@ fn place_if_missing(
     })
 }
 
-/// Train `ut` from the producing building if under `target` and the batch can
-/// still afford it.
-///
-/// `target` counts spawned units plus units still queued, so the bot does not
-/// over-commit ore. Queue capacity is checked against the batch's bookings so
-/// several trains in one turn cannot overfill a producer. Tech-gated units
-/// (artillery, mammoth) stay masked until a TechLab exists, mirroring the
-/// sim's validator exactly.
 /// Place a generic refinery on the nearest live deposit of `resource`.
-/// Resource refineries are the scripted bots' expansion step: unlike ordinary
-/// structures they do not need to sit beside the HQ, but the command still
-/// goes through the same server validator and batch resource ledger.
+/// Resource refineries are the expansion step: unlike ordinary structures
+/// they do not need to sit beside the HQ, but the command still goes through
+/// the same server validator and batch resource ledger.
 fn place_refinery_for_resource(
     g: &Game,
     p: Player,
@@ -275,6 +282,14 @@ fn place_refinery_for_resource(
     None
 }
 
+/// Train `ut` from the producing building if under `target` and the batch can
+/// still afford it.
+///
+/// `target` counts spawned units plus units still queued, so the bot does not
+/// over-commit ore. Queue capacity is checked against the batch's bookings so
+/// several trains in one turn cannot overfill a producer. Tech-gated units
+/// (artillery, mammoth) stay masked until a TechLab exists, mirroring the
+/// sim's validator exactly.
 fn train_up_to(
     g: &Game,
     p: Player,
@@ -508,28 +523,258 @@ fn base_offset(hq: (u8, u8), dx: i32, dy: i32) -> (u8, u8) {
 }
 
 // ---------------------------------------------------------------------------
-// Easy — passive turtle
+// The unified commander
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct EasyBot {
-    /// Number of turrets placed so far; the turtle never rebuilds them, so
-    /// sustained waves eventually break through.
-    built_turrets: u8,
+/// Anchor difficulties for the three historical tiers. `difficulty` falls
+/// into the band of the nearest anchor, so stepping `0.15 → 0.5 → 0.9` moves
+/// through the full spectrum; anything between picks the matching archetype.
+const D_EASY: f32 = 0.15;
+const D_MEDIUM: f32 = 0.5;
+const D_HARD: f32 = 0.9;
+
+/// Whether a training spec may fire right now.
+#[derive(Clone, Copy)]
+enum Gate {
+    /// No condition beyond affordability/buildings.
+    Always,
+    /// A Steel refinery is secured (built/claimed).
+    SteelSecured,
+    /// Steel AND Coal refineries are secured AND a Factory exists.
+    SteelCoalAndFactory,
+    /// At least `n` infantry are fielded.
+    InfantryGe(usize),
+    /// A TechLab exists and `turn > n` (`n == 0` → any turn once it exists).
+    TechLabAfter(i32),
+    /// `turn > n`.
+    Turn(i32),
 }
 
-impl Bot for EasyBot {
+#[derive(Clone, Copy)]
+struct TrainSpec {
+    unit: UnitType,
+    producer: BuildingType,
+    target: u32,
+    gate: Gate,
+}
+
+/// One difficulty archetype: strategy expressed as data (not three separate
+/// `decide()` bodies), read by the single `AdaptiveBot::decide` below.
+#[derive(Clone, Copy)]
+struct Policy {
+    /// Build Factory before Barracks (vs Barracks-first to flood bodies).
+    factory_first: bool,
+    /// Build a PowerPlant in the opening.
+    powerplant: bool,
+    /// Turns after which to secure Steel / Coal refineries (`0` = never).
+    steel_turn: i32,
+    coal_turn: i32,
+    /// Defensive turret plan.
+    turrets: u8,
+    turret_start_turn: i32,
+    turret_distance: i32,
+    /// Ordered army training plan (priority order = fielding order).
+    army: &'static [TrainSpec],
+    /// Drive the research tree from a TechLab.
+    research: bool,
+    /// TechLab build time: `0` = ASAP, `i32::MAX` = never.
+    techlab_turn: i32,
+    /// SAM/AA anti-air cap and switch.
+    sam_scale: u32,
+    aa: bool,
+    /// Late-game second factory / testsla defense (`0` = off).
+    second_factory: bool,
+    tesla_turn: i32,
+    /// Opening scout window (turn cutoff; `0` = none).
+    scout_until: i32,
+    /// Minimum combat units before the march fires (`0` = always defend).
+    march_threshold: i32,
+    /// Distance within which any unit counts as "committed" and keeps pressing.
+    committed_dist: i32,
+    /// Defend the own HQ (true) vs push the enemy HQ (false).
+    defend: bool,
+}
+
+const EASY: Policy = Policy {
+    factory_first: true,
+    powerplant: false,
+    steel_turn: 0,
+    coal_turn: 0,
+    turrets: 3,
+    turret_start_turn: 20,
+    turret_distance: 2,
+    army: &[
+        TrainSpec {
+            unit: UnitType::Infantry,
+            producer: BuildingType::Barracks,
+            target: 4,
+            gate: Gate::Always,
+        },
+        TrainSpec {
+            unit: UnitType::Tank,
+            producer: BuildingType::Factory,
+            target: 1,
+            gate: Gate::Always,
+        },
+    ],
+    research: false,
+    techlab_turn: i32::MAX,
+    sam_scale: 0,
+    aa: false,
+    second_factory: false,
+    tesla_turn: 0,
+    scout_until: 0,
+    march_threshold: 0,
+    committed_dist: 0,
+    defend: true,
+};
+
+const MEDIUM: Policy = Policy {
+    factory_first: false,
+    powerplant: false,
+    steel_turn: 8,
+    coal_turn: 22,
+    turrets: 0,
+    turret_start_turn: 0,
+    turret_distance: 3,
+    army: &[
+        TrainSpec {
+            unit: UnitType::Infantry,
+            producer: BuildingType::Barracks,
+            target: 10,
+            gate: Gate::SteelSecured,
+        },
+        TrainSpec {
+            unit: UnitType::Artillery,
+            producer: BuildingType::Factory,
+            target: 3,
+            gate: Gate::TechLabAfter(35),
+        },
+        TrainSpec {
+            unit: UnitType::Tank,
+            producer: BuildingType::Factory,
+            target: 4,
+            gate: Gate::InfantryGe(4),
+        },
+    ],
+    research: false,
+    techlab_turn: 30,
+    sam_scale: 0,
+    aa: false,
+    second_factory: false,
+    tesla_turn: 0,
+    scout_until: 0,
+    march_threshold: 8,
+    committed_dist: 12,
+    defend: false,
+};
+
+const HARD: Policy = Policy {
+    factory_first: true,
+    powerplant: true,
+    steel_turn: 10,
+    coal_turn: 24,
+    turrets: 1,
+    turret_start_turn: 15,
+    turret_distance: 3,
+    army: &[
+        TrainSpec {
+            unit: UnitType::Tank,
+            producer: BuildingType::Factory,
+            target: 14,
+            gate: Gate::SteelCoalAndFactory,
+        },
+        TrainSpec {
+            unit: UnitType::Infantry,
+            producer: BuildingType::Barracks,
+            target: 8,
+            gate: Gate::SteelCoalAndFactory,
+        },
+        TrainSpec {
+            unit: UnitType::RocketTrooper,
+            producer: BuildingType::Barracks,
+            target: 2,
+            gate: Gate::SteelCoalAndFactory,
+        },
+        TrainSpec {
+            unit: UnitType::Artillery,
+            producer: BuildingType::Factory,
+            target: 4,
+            gate: Gate::SteelCoalAndFactory,
+        },
+        TrainSpec {
+            unit: UnitType::MammothTank,
+            producer: BuildingType::Factory,
+            target: 2,
+            gate: Gate::Turn(80),
+        },
+    ],
+    research: true,
+    techlab_turn: 0,
+    sam_scale: 4,
+    aa: true,
+    second_factory: true,
+    tesla_turn: 45,
+    scout_until: 14,
+    march_threshold: 4,
+    committed_dist: 0,
+    defend: false,
+};
+
+/// Resolve a difficulty scalar to its nearest anchor archetype.
+fn policy_for(difficulty: f32) -> Policy {
+    let anchors = [(D_EASY, EASY), (D_MEDIUM, MEDIUM), (D_HARD, HARD)];
+    let mut best = EASY;
+    let mut best_d = f32::MAX;
+    for (anchor, policy) in anchors {
+        let d = (difficulty - anchor).abs();
+        // On a tie pick the easier archetype (lower difficulty).
+        if d < best_d {
+            best_d = d;
+            best = policy;
+        }
+    }
+    best
+}
+
+/// The single, difficulty-parameterized commander. `difficulty` in `0..=1`
+/// selects the strategy: low → defensive turtle, mid → infantry pressure,
+/// high → expand-and-push with the full tech tree.
+pub struct AdaptiveBot {
+    difficulty: f32,
+}
+
+impl AdaptiveBot {
+    pub fn new(difficulty: f32) -> Self {
+        Self {
+            difficulty: difficulty.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn difficulty(&self) -> f32 {
+        self.difficulty
+    }
+}
+
+impl Bot for AdaptiveBot {
     fn name(&self) -> &'static str {
-        "easy"
+        if self.difficulty >= D_HARD - 0.1 {
+            "hard"
+        } else if self.difficulty >= (D_MEDIUM + D_EASY) / 2.0 {
+            "medium"
+        } else {
+            "easy"
+        }
     }
 
     fn decide(&mut self, g: &Game, p: Player) -> Vec<Command> {
+        let pol = policy_for(self.difficulty);
         let mut out = Vec::new();
         let mut plan = Plan::default();
         let hq = g.hq(p).map(|b| b.tile).unwrap_or((8, 8));
+        let enemy = enemy_hq_tile(g, p);
 
-        // Economy first: refinery + factory. The factory must precede the
-        // barracks or the turtle never gets income.
+        // --- Economy openers (all tiers: refinery first) ---
         if let Some(c) = place_if_missing(
             g,
             p,
@@ -540,309 +785,17 @@ impl Bot for EasyBot {
         ) {
             out.push(c);
         }
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Factory,
-            base_offset(hq, 0, 2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-
-        // Defense once income is running: a few infantry + enemy-facing
-        // turrets slow the opening rush; the turtle otherwise sits still, so
-        // these delay the inevitable rather than win. The turtle spends on
-        // fortifications, not a march army — a true turtle never fields a
-        // tank-heavy force that could rival a rusher's.
-        if own_building(g, p, BuildingType::Factory).is_some() {
+        if pol.factory_first {
             if let Some(c) = place_if_missing(
-                g,
-                p,
-                BuildingType::Barracks,
-                base_offset(hq, 2, 2),
-                1,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-            // A small garrison: 4 infantry. The turtle's defense is its
-            // turrets, not a field army — a garrison this size delays the
-            // inevitable rush, it does not out-fight it.
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Barracks,
-                UnitType::Infantry,
-                4,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-            // Turrets replace the army: one at turn 20, a second at 40, a
-            // third at 60 — each ~150 HP of defense for 100 ore.
-            if g.turn > 20 && self.built_turrets < 1 {
-                let t = toward_enemy(hq, enemy_hq_tile(g, p), 2);
-                if let Some(c) = place_if_missing(g, p, BuildingType::Turret, t, 1, &mut plan) {
-                    out.push(c);
-                }
-            }
-            if g.turn > 40 && self.built_turrets < 2 {
-                let t = toward_enemy(hq, enemy_hq_tile(g, p), 3);
-                if let Some(c) = place_if_missing(g, p, BuildingType::Turret, t, 2, &mut plan) {
-                    out.push(c);
-                }
-            }
-            if g.turn > 60 && self.built_turrets < 3 {
-                let t = toward_enemy(hq, enemy_hq_tile(g, p), 4);
-                if let Some(c) = place_if_missing(g, p, BuildingType::Turret, t, 3, &mut plan) {
-                    out.push(c);
-                }
-            }
-            self.built_turrets = self
-                .built_turrets
-                .max(count_buildings(g, p, BuildingType::Turret) as u8);
-        }
-
-        // A token tank for counter-attacks once invaders break in; nothing
-        // more — the turtle's army must stay smaller than a rusher's.
-        if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 1, &mut plan) {
-            out.push(c);
-        }
-
-        // Even the turtle fights back when an enemy stands in range —
-        // otherwise invaders would chew through it for free.
-        out.extend(army_orders(g, p, hq));
-        out.push(Command::EndTurn { player: p });
-        out
-    }
-}
-
-/// Public constructor.
-pub fn easy() -> EasyBot {
-    EasyBot::default()
-}
-
-// ---------------------------------------------------------------------------
-// Medium — periodic attack waves
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-pub struct MediumBot {
-    // The rush bot presses from the moment its first wave is ready; there is
-    // no interval gate — with tile-based movement and an 80-turn cap, a
-    // 20–30 turn "wave" cadence meant armies never met (matches timed out
-    // with zero combat). Continuous pressure is the wave: each turn the army
-    // advances or strikes, and fresh trains reinforce it.
-}
-
-impl Bot for MediumBot {
-    fn name(&self) -> &'static str {
-        "medium"
-    }
-
-    fn decide(&mut self, g: &Game, p: Player) -> Vec<Command> {
-        let mut out = Vec::new();
-        let mut plan = Plan::default();
-        let hq = g.hq(p).map(|b| b.tile).unwrap_or((8, 8));
-
-        // Rush economy: refinery first (the turtle does the same — a rush
-        // needs income to sustain the wave), but the spending priorities
-        // diverge: barracks + factory over turrets, and every spare ore is
-        // an infantry body, not a fortification.
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Refinery,
-            base_offset(hq, 2, 0),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Barracks,
-            base_offset(hq, 2, 2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Factory,
-            base_offset(hq, 0, 2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        // Late-game siege: a TechLab once the first wave is on the march, so
-        // wave two brings artillery (range 3, 110 dmg) that out-trades the
-        // turtle's turrets (12 dmg) and cracks a base infantry alone cannot.
-        // The lab also starts the research tree; the rocket troopers it
-        // unlocks reinforce later waves.
-        if g.turn > 30 {
-            if let Some(c) = place_if_missing(
-                g,
-                p,
-                BuildingType::TechLab,
-                base_offset(hq, -2, 2),
-                1,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-        }
-        // Capture the industrial deposits that make the separate stockpiles
-        // matter. Medium sacrifices a few early bodies to secure Steel and
-        // Coal, then converts those materials into a sustainable wave.
-        let mut steel_refinery_planned = g.buildings.iter().any(|b| {
-            b.owner == p
-                && b.btype.is_refinery()
-                && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Steel)
-        });
-        if g.turn > 8 {
-            if let Some(c) = place_refinery_for_resource(
-                g,
-                p,
-                ResourceType::Steel,
-                base_offset(hq, 6, 0),
-                &mut plan,
-            ) {
-                out.push(c);
-                steel_refinery_planned = true;
-            }
-        }
-        if g.turn > 22 {
-            if let Some(c) = place_refinery_for_resource(
-                g,
-                p,
-                ResourceType::Coal,
-                base_offset(hq, 10, 0),
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-        }
-
-        // The medium never researches: its identity is cheap continuous
-        // pressure, and the wave needs every ore point as a body, not a tech.
-        // (Hard is the tech pusher and owns the research tree.)
-
-        // The wave: infantry bodies (cheap, 1-turn build) as the hammer,
-        // tanks as the anvil once the infantry train is running.
-        // Preserve the opening Steel reserve until the Steel refinery is
-        // secured. Without this guard the cheap infantry queue consumes the
-        // exact material needed to claim the next deposit and the rush stalls
-        // forever on its first three bodies.
-        if steel_refinery_planned {
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Barracks,
-                UnitType::Infantry,
-                10,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-        }
-        // Artillery out-prioritizes tanks in the factory queue once the
-        // TechLab is up: it is the siege tool that cracks a turtled base
-        // (range 3, 110 dmg vs the turret's 12), and if tank orders run
-        // first the queue never gets around to it. Tanks still join, but
-        // only once the artillery train is satisfied.
-        if own_building(g, p, BuildingType::TechLab).is_some() && g.turn > 35 {
-            if let Some(c) = train_up_to(
                 g,
                 p,
                 BuildingType::Factory,
-                UnitType::Artillery,
-                3,
+                base_offset(hq, 0, 2),
+                1,
                 &mut plan,
             ) {
                 out.push(c);
             }
-        }
-        if count_units(g, p, UnitType::Infantry) >= 4 {
-            if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 4, &mut plan)
-            {
-                out.push(c);
-            }
-        }
-
-        // Concentrated waves: hold the force at home until it reaches the
-        // wave threshold, then march the whole group together. Trickling one
-        // unit at a time into a defended base just feeds the turrets; a
-        // concentrated arrival overwhelms them. Once a wave is committed
-        // (any unit near the enemy base), it keeps pressing to the death —
-        // freezing survivors mid-assault below the threshold just lets the
-        // turtle rebuild for free. The next wave builds up only after this
-        // one is spent.
-        let objective = enemy_hq_tile(g, p);
-        let combat = combat_unit_ids(g, p);
-        let committed = combat.iter().any(|&id| {
-            g.unit(p, id)
-                .is_some_and(|u| chebyshev(u.tile.0, u.tile.1, objective.0, objective.1) <= 12)
-        });
-        if combat.len() >= 8 || committed {
-            out.extend(army_orders(g, p, objective));
-        }
-        out.push(Command::EndTurn { player: p });
-        out
-    }
-}
-
-/// Public constructor.
-pub fn medium() -> MediumBot {
-    MediumBot::default()
-}
-
-// ---------------------------------------------------------------------------
-// Hard — expand-and-push
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-pub struct HardBot {
-    // Same continuous-pressure rationale as MediumBot: turn-based movement
-    // made the old 20-turn interval gate stall armies until timeout.
-}
-
-impl Bot for HardBot {
-    fn name(&self) -> &'static str {
-        "hard"
-    }
-
-    fn decide(&mut self, g: &Game, p: Player) -> Vec<Command> {
-        let mut out = Vec::new();
-        let mut plan = Plan::default();
-        let hq = g.hq(p).map(|b| b.tile).unwrap_or((8, 8));
-
-        // Core production buildings.
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Refinery,
-            base_offset(hq, 2, 0),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::Factory,
-            base_offset(hq, 0, 2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
         }
         if let Some(c) = place_if_missing(
             g,
@@ -854,26 +807,38 @@ impl Bot for HardBot {
         ) {
             out.push(c);
         }
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::PowerPlant,
-            base_offset(hq, 0, -2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
+        if !pol.factory_first {
+            if let Some(c) = place_if_missing(
+                g,
+                p,
+                BuildingType::Factory,
+                base_offset(hq, 0, 2),
+                1,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
+        }
+        if pol.powerplant {
+            if let Some(c) = place_if_missing(
+                g,
+                p,
+                BuildingType::PowerPlant,
+                base_offset(hq, 0, -2),
+                1,
+                &mut plan,
+            ) {
+                out.push(c);
+            }
         }
 
-        // Secure industrial deposits before the heavy queue consumes the
-        // opening reserve. The generic refinery works on Steel/Coal exactly
-        // as it does on Ore; this is what lets the hard bot sustain armor.
-        let mut steel_refinery_planned = g.buildings.iter().any(|b| {
+        // --- Expansion refineries (0 = never) ---
+        let steel_secured = g.buildings.iter().any(|b| {
             b.owner == p
                 && b.btype.is_refinery()
                 && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Steel)
         });
-        if g.turn > 10 {
+        if pol.steel_turn > 0 && g.turn > pol.steel_turn {
             if let Some(c) = place_refinery_for_resource(
                 g,
                 p,
@@ -882,15 +847,14 @@ impl Bot for HardBot {
                 &mut plan,
             ) {
                 out.push(c);
-                steel_refinery_planned = true;
             }
         }
-        let mut coal_refinery_planned = g.buildings.iter().any(|b| {
+        let coal_secured = g.buildings.iter().any(|b| {
             b.owner == p
                 && b.btype.is_refinery()
                 && g.map.resource_at(b.tile.0, b.tile.1) == Some(ResourceType::Coal)
         });
-        if g.turn > 24 {
+        if pol.coal_turn > 0 && g.turn > pol.coal_turn {
             if let Some(c) = place_refinery_for_resource(
                 g,
                 p,
@@ -899,82 +863,78 @@ impl Bot for HardBot {
                 &mut plan,
             ) {
                 out.push(c);
-                coal_refinery_planned = true;
+            }
+        }
+        let had_factory = own_building(g, p, BuildingType::Factory).is_some();
+
+        // --- TechLab ---
+        if pol.techlab_turn != i32::MAX {
+            let due = pol.techlab_turn == 0 || g.turn > pol.techlab_turn;
+            if due {
+                if let Some(c) = place_if_missing(
+                    g,
+                    p,
+                    BuildingType::TechLab,
+                    base_offset(hq, -2, 2),
+                    1,
+                    &mut plan,
+                ) {
+                    out.push(c);
+                }
             }
         }
 
-        // Early army: 8 infantry + 6 tanks. Once Rocket Propulsion lands,
-        // a couple of rocket troopers (tech-gated in `train_up_to`) join the
-        // barracks queue — they out-trade armor without diluting it.
-        // Do not let the cheap barracks queue starve the factory timing: the
-        // hard tier is defined by getting armor online, so hold infantry until
-        // the first factory exists. Within the armor phase, book the tank
-        // before the infantry so the mixed army cannot spend every small
-        // income tick on rifles and never reach its defining unit. The medium
-        // tier intentionally takes the opposite trade and floods infantry.
-        if steel_refinery_planned
-            && coal_refinery_planned
-            && own_building(g, p, BuildingType::Factory).is_some()
-        {
-            if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 6, &mut plan)
-            {
-                out.push(c);
+        // --- Army training (policy's ordered table) ---
+        for spec in pol.army {
+            let gate_ok = match spec.gate {
+                Gate::Always => true,
+                Gate::SteelSecured => steel_secured,
+                Gate::SteelCoalAndFactory => steel_secured && coal_secured && had_factory,
+                Gate::InfantryGe(n) => count_units(g, p, UnitType::Infantry) >= n,
+                Gate::TechLabAfter(n) => {
+                    own_building(g, p, BuildingType::TechLab).is_some() && (n == 0 || g.turn > n)
+                }
+                Gate::Turn(n) => g.turn > n,
+            };
+            if gate_ok {
+                if let Some(c) = train_up_to(
+                    g,
+                    p,
+                    spec.producer,
+                    spec.unit,
+                    spec.target as usize,
+                    &mut plan,
+                ) {
+                    out.push(c);
+                }
             }
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Barracks,
-                UnitType::Infantry,
-                8,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Barracks,
-                UnitType::RocketTrooper,
-                2,
-                &mut plan,
-            ) {
+        }
+
+        // --- Research tree ---
+        if pol.research {
+            if let Some(c) = research_next(g, p) {
                 out.push(c);
             }
         }
 
-        // One early turret to blunt the opening rush: hard must survive the
-        // wave before its tech and dual factories come online. A single
-        // enemy-facing turret (range 3) peels one attacker per turn off the
-        // march — cheap insurance against the one build order that beats a
-        // slow expand.
-        if g.turn > 15 {
-            let t = toward_enemy(hq, enemy_hq_tile(g, p), 3);
-            if let Some(c) = place_if_missing(g, p, BuildingType::Turret, t, 1, &mut plan) {
-                out.push(c);
+        // --- Defense: turrets ---
+        for i in 0..pol.turrets {
+            if g.turn > pol.turret_start_turn + i as i32 * 20 {
+                if let Some(c) = place_if_missing(
+                    g,
+                    p,
+                    BuildingType::Turret,
+                    toward_enemy(hq, enemy, pol.turret_distance + i as i32),
+                    i as usize + 1,
+                    &mut plan,
+                ) {
+                    out.push(c);
+                }
             }
         }
 
-        // Tech Lab & the research tree (damage first, then the rocket
-        // unlocks). `research_next` fires every turn research is idle, so the
-        // lab keeps working through the whole tree.
-        if let Some(c) = place_if_missing(
-            g,
-            p,
-            BuildingType::TechLab,
-            base_offset(hq, -2, 2),
-            1,
-            &mut plan,
-        ) {
-            out.push(c);
-        }
-        // Hard is the tech pusher: research runs from the moment the lab is
-        // up, powering the whole tree by the late game.
-        if let Some(c) = research_next(g, p) {
-            out.push(c);
-        }
-
-        // Dual Factory mass production.
-        if own_building(g, p, BuildingType::TechLab).is_some() {
+        // --- Late-game: second factory, Tesla defense ---
+        if pol.second_factory && own_building(g, p, BuildingType::TechLab).is_some() {
             if let Some(c) = place_if_missing(
                 g,
                 p,
@@ -986,14 +946,10 @@ impl Bot for HardBot {
                 out.push(c);
             }
         }
-
-        // Second-tier tech once the army is fielded and the bank allows it
-        // (a Tesla Coil guards the base, with a second PowerPlant paying its
-        // bill; mammoth tanks form the late-game siege core). The turn gates
-        // keep the tech spend from starving the massed army, and keep the
-        // hard benchmark exercising the full tech tree.
-        if own_building(g, p, BuildingType::TechLab).is_some() && g.turn > 45 {
-            // Second PowerPlant once the bank allows (pays the coil's bill).
+        if pol.tesla_turn > 0
+            && g.turn > pol.tesla_turn
+            && own_building(g, p, BuildingType::TechLab).is_some()
+        {
             if g.can_afford(p, building_stats(BuildingType::PowerPlant).resource_cost) {
                 if let Some(c) = place_if_missing(
                     g,
@@ -1006,13 +962,12 @@ impl Bot for HardBot {
                     out.push(c);
                 }
             }
-            // Tesla Coil guard once the bank can absorb a 250 ore spend.
             if g.can_afford(p, building_stats(BuildingType::TeslaCoil).resource_cost) {
                 if let Some(c) = place_if_missing(
                     g,
                     p,
                     BuildingType::TeslaCoil,
-                    toward_enemy(hq, enemy_hq_tile(g, p), 3),
+                    toward_enemy(hq, enemy, 3),
                     1,
                     &mut plan,
                 ) {
@@ -1020,57 +975,33 @@ impl Bot for HardBot {
                 }
             }
         }
-        if own_building(g, p, BuildingType::TechLab).is_some()
-            && g.turn > 80
-            && g.can_afford(p, unit_stats(UnitType::MammothTank).resource_cost)
-        {
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Factory,
-                UnitType::MammothTank,
-                2,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
-        }
 
-        // Mass late-game armor: 14 tanks + 4 artillery. Keep the material
-        // gate explicit so the reserve for the first industrial refinery is
-        // never consumed by an attractive-but-illegal training order.
-        if steel_refinery_planned && coal_refinery_planned {
-            // Anti-air reaction: if the enemy has visible aircraft, build
-            // SAM launchers and AA turrets. This makes the hard bot adapt
-            // to air-heavy strategies rather than being helpless.
+        // --- Anti-air reaction ---
+        if pol.aa {
             let enemy_air = g
                 .units
                 .iter()
                 .filter(|u| u.owner == p.enemy() && unit_stats(u.utype).air)
                 .count();
             if enemy_air > 0 {
-                let has_rockets = g.research[p.index()].has(TechId::RocketPropulsion);
-                if has_rockets {
+                if g.research[p.index()].has(TechId::RocketPropulsion) {
                     if let Some(c) = train_up_to(
                         g,
                         p,
                         BuildingType::Factory,
                         UnitType::SamLauncher,
-                        enemy_air.min(4),
+                        pol.sam_scale.min(enemy_air as u32).max(1) as usize,
                         &mut plan,
                     ) {
                         out.push(c);
                     }
                 }
-                if g.buildings
-                    .iter()
-                    .any(|b| b.owner == p && b.btype == BuildingType::TechLab && b.is_operational())
-                {
+                if own_building(g, p, BuildingType::TechLab).is_some() {
                     if let Some(c) = place_if_missing(
                         g,
                         p,
                         BuildingType::AATurret,
-                        toward_enemy(hq, enemy_hq_tile(g, p), 3),
+                        toward_enemy(hq, enemy, 3),
                         2,
                         &mut plan,
                     ) {
@@ -1078,43 +1009,53 @@ impl Bot for HardBot {
                     }
                 }
             }
-
-            if let Some(c) = train_up_to(g, p, BuildingType::Factory, UnitType::Tank, 14, &mut plan)
-            {
-                out.push(c);
-            }
-            if let Some(c) = train_up_to(
-                g,
-                p,
-                BuildingType::Factory,
-                UnitType::Artillery,
-                4,
-                &mut plan,
-            ) {
-                out.push(c);
-            }
         }
 
-        // Opening book: while the army is still assembling, the first units
-        // scout the nearest unclaimed resource pocket instead of idling by
-        // the HQ. This secures early vision of the contested deposits; the
-        // march takes over once the force reaches four units.
-        if g.turn <= 14 {
+        // --- Opening scout (windowed; no-op once the army exceeds 3) ---
+        if pol.scout_until > 0 && g.turn <= pol.scout_until {
             out.extend(opening_scout(g, p));
         }
 
-        // Tactical push: advance or strike every turn once a minimum army is
-        // fielded (continuous pressure; see MediumBot for why).
-        let combat = combat_unit_ids(g, p).len();
-        if combat >= 4 {
-            out.extend(army_orders(g, p, enemy_hq_tile(g, p)));
+        // --- March ---
+        let objective = if pol.defend { hq } else { enemy };
+        let combat = combat_unit_ids(g, p);
+        let committed = pol.committed_dist > 0
+            && combat.iter().any(|&id| {
+                g.unit(p, id).is_some_and(|u| {
+                    chebyshev(u.tile.0, u.tile.1, objective.0, objective.1)
+                        <= pol.committed_dist
+                })
+            });
+        if pol.march_threshold == 0
+            || combat.len() as i32 >= pol.march_threshold
+            || committed
+        {
+            out.extend(army_orders(g, p, objective));
         }
+
         out.push(Command::EndTurn { player: p });
         out
     }
 }
 
-/// Public constructor.
-pub fn hard() -> HardBot {
-    HardBot::default()
+/// Public constructors. The historical tier names are kept (with unchanged
+/// signatures) so the trainer, curriculum, balance baseline, gauntlet and
+/// `bots.rs` acceptances all keep working — each is just an `AdaptiveBot` at
+/// its anchor difficulty.
+pub fn easy() -> AdaptiveBot {
+    AdaptiveBot::new(D_EASY)
+}
+
+pub fn medium() -> AdaptiveBot {
+    AdaptiveBot::new(D_MEDIUM)
+}
+
+pub fn hard() -> AdaptiveBot {
+    AdaptiveBot::new(D_HARD)
+}
+
+/// Build an `AdaptiveBot` at an explicit difficulty (`0..=1`). The server
+/// uses this for the `adaptive` / `adaptive:<scalar>` opponent.
+pub fn adaptive(difficulty: f32) -> AdaptiveBot {
+    AdaptiveBot::new(difficulty)
 }

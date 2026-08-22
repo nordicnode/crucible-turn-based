@@ -12,8 +12,8 @@
     {
       "matchup": "hard>medium",
       "rate": {
-        "a_wins": 30,
-        "b_wins": 2,
+        "a_wins": 29,
+        "b_wins": 3,
         "draws": 0,
         "matches": 32
       }

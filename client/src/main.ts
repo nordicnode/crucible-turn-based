@@ -2412,7 +2412,11 @@ const adaptiveBtn = el("adaptive-btn");
 if (adaptiveBtn) {
   adaptiveBtn.addEventListener("click", () => {
     const tier = adaptiveTier();
-    startMatch(tier, tier);
+    // One unified adaptive opponent: send the difficulty scalar to the server
+    // (the trainer's `adaptive()` commander picks the matching archetype).
+    const DIFF: Record<string, number> = { easy: 0.3, medium: 0.55, hard: 0.85 };
+    const diff = (DIFF[tier] ?? 0.55).toFixed(2);
+    startMatch(`adaptive:${diff}`, tier.toUpperCase());
   });
 }
 

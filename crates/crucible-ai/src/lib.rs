@@ -24,6 +24,6 @@ pub use headless::{
     MatchOutcome, SeriesReport,
 };
 pub use network::{forward, init, mutate, GENOME_LEN, OUTPUT};
-pub use scripted::{easy, hard, medium};
+pub use scripted::{adaptive, easy, hard, medium, AdaptiveBot};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
