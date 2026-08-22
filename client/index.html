@@ -36,10 +36,17 @@
         user-select: none;
       }
 
+      /* The canvas is a replaced element: with `width/height: auto` its box
+         follows the intrinsic size from its attributes (300×150 by default)
+         instead of stretching to the insets, which pins the viewport tiny in
+         the top-left corner. Size it explicitly so it always fills its box. */
       #view {
         display: block;
         position: absolute;
-        inset: 0;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
         cursor: crosshair;
         image-rendering: pixelated;
         image-rendering: crisp-edges;
@@ -1044,7 +1051,7 @@
       @media (max-width: 900px) {
         #sidebar { right: 8px; width: min(310px, calc(100vw - 16px)); }
         #sidebar #inspector { max-height: min(34vh, 310px); }
-        #radar-block { right: calc(min(310px, 34vw) + 16px); }
+        #radar-block { right: calc(min(310px, calc(100vw - 16px)) + 20px); }
       }
       @media (max-width: 600px) {
         #sidebar {
@@ -1067,20 +1074,22 @@
          land through a command panel when the HQ starts near a boundary. */
       body.in-match #view {
         top: 46px;
-        right: min(320px, 30vw);
-        bottom: 0;
         left: 0;
-        width: auto;
-        height: auto;
+        width: calc(100% - min(320px, 30vw));
+        height: calc(100% - 46px);
       }
       @media (max-width: 900px) {
-        body.in-match #view { right: calc(min(310px, 34vw) + 8px); }
+        /* Mirror the rail's exact geometry: min(310px, 100vw - 16px) wide
+           plus its 8px right margin — the old 34vw estimate under-reserved
+           and let the canvas slip underneath the sidebar. */
+        body.in-match #view { width: calc(100% - min(310px, calc(100% - 16px)) - 8px); }
       }
       @media (max-width: 600px) {
         body.in-match #view {
           top: 110px;
-          right: 0;
-          bottom: calc(47vh + 12px);
+          left: 0;
+          width: 100%;
+          height: calc(100% - 110px - 47vh - 12px);
         }
       }
     </style>

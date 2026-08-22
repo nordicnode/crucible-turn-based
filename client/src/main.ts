@@ -1856,9 +1856,18 @@ function resize(): void {
   // actual CSS box so camera math and pointer coordinates share one viewport.
   const fallbackW = window.innerWidth || document.documentElement.clientWidth || 800;
   const fallbackH = window.innerHeight || document.documentElement.clientHeight || 600;
+  // The menu canvas always covers the window; in-match it is the battlefield
+  // inset between the top bar and the command rail. Fall back to window
+  // metrics when the CSS box is degenerate (e.g. a stale stylesheet leaves
+  // the canvas at its 300×150 intrinsic default).
+  const inMatch = document.body.classList.contains("in-match");
   const rect = canvas.getBoundingClientRect();
-  const w = Math.max(1, Math.floor(rect.width || fallbackW));
-  const h = Math.max(1, Math.floor(rect.height || fallbackH));
+  const w = inMatch
+    ? (rect.width >= 100 ? Math.floor(rect.width) : fallbackW)
+    : fallbackW;
+  const h = inMatch
+    ? (rect.height >= 100 ? Math.floor(rect.height) : fallbackH)
+    : fallbackH;
   canvas.width = w;
   canvas.height = h;
   renderer.camera.setViewport(w, h);
