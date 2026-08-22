@@ -676,6 +676,8 @@
         font-family: var(--serif);
       }
       .menu-footer .footer-name { color: var(--gold-bright); font-weight: 700; }
+      .menu-footer .footer-link { color: var(--ivory); text-decoration: none; border-bottom: 1px solid var(--line-hi); }
+      .menu-footer .footer-link:hover { color: var(--gold-bright); border-bottom-color: var(--gold); }
       .panel {
         background: var(--panel-strong);
         backdrop-filter: blur(8px);
@@ -1363,7 +1365,7 @@
         <div class="row"><button class="btn" id="spectate-list-back">Return to Briefing</button></div>
       </div>
 
-      <div class="menu-footer"><span class="footer-inner">Created by <span class="footer-name">Mikey</span> · Built with Freebuff</span></div>
+      <div class="menu-footer"><span class="footer-inner">Created by <span class="footer-name">Mikey</span> · Built with <a class="footer-link" href="https://freebuff.com/" target="_blank" rel="noopener noreferrer">Freebuff</a></span></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
