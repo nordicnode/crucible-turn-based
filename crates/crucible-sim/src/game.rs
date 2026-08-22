@@ -427,6 +427,40 @@ impl Game {
             .map(|u| u.id)
     }
 
+    /// Total stacking footprint in use on `tile` (sum of `stack_size` of every
+    /// living unit there).
+    pub fn stack_used(&self, tile: (u8, u8)) -> i32 {
+        self.units
+            .iter()
+            .filter(|u| u.is_alive() && u.tile == tile)
+            .map(|u| crate::entity::stack_size(u.utype))
+            .sum()
+    }
+
+    /// Whether a unit of `utype` with `owner` may enter/stand on `tile`.
+    /// Enemy-held tiles are always blocked (a unit fights from an adjacent
+    /// tile and cannot pile onto the enemy's space). Only friendly units share
+    /// a tile, up to the stack capacity; a single unit of any size always fits.
+    pub fn can_occupy(&self, tile: (u8, u8), utype: UnitType, owner: Player) -> bool {
+        if self.building_at(tile).is_some() {
+            return false;
+        }
+        if self
+            .units
+            .iter()
+            .any(|u| u.is_alive() && u.tile == tile && u.owner != owner)
+        {
+            return false;
+        }
+        let used: i32 = self
+            .units
+            .iter()
+            .filter(|u| u.is_alive() && u.tile == tile && u.owner == owner)
+            .map(|u| crate::entity::stack_size(u.utype))
+            .sum();
+        used == 0 || used + crate::entity::stack_size(utype) <= crate::entity::TILE_STACK_CAPACITY
+    }
+
     /// The HQ building of a player, if alive.
     pub fn hq(&self, player: Player) -> Option<&Building> {
         self.buildings
@@ -779,11 +813,17 @@ impl Game {
     }
 
     fn resolve_unit_move(&mut self, id: EntityId) {
-        let Some((mut target, mp, fly, from)) = self
-            .units
-            .iter()
-            .find(|u| u.id == id)
-            .map(|u| (u.move_target, u.mp, unit_stats(u.utype).air, u.tile))
+        let Some((mut target, owner, utype, mp, fly, from)) =
+            self.units.iter().find(|u| u.id == id).map(|u| {
+                (
+                    u.move_target,
+                    u.owner,
+                    u.utype,
+                    u.mp,
+                    unit_stats(u.utype).air,
+                    u.tile,
+                )
+            })
         else {
             return;
         };
@@ -815,7 +855,7 @@ impl Game {
             if spent + cost > mp {
                 break;
             }
-            if self.unit_at(next).is_some_and(|occupant| occupant != id) {
+            if !self.can_occupy(next, utype, owner) {
                 break;
             }
             spent += cost;
@@ -865,7 +905,7 @@ impl Game {
             if spent + cost > u.mp {
                 break;
             }
-            if self.unit_at(next).is_some_and(|occupant| occupant != u.id) {
+            if !self.can_occupy(next, u.utype, u.owner) {
                 break;
             }
             spent += cost;
@@ -1310,7 +1350,7 @@ impl Game {
                     continue;
                 }
                 // Spawn on a free adjacent tile.
-                let Some(spawn_tile) = self.pick_spawn_tile(tile) else {
+                let Some(spawn_tile) = self.pick_spawn_tile(tile, item, player) else {
                     // Nowhere to place: hold at completion (retry next turn).
                     if let Some(b) = self.building_mut(player, bid) {
                         b.progress = build_time;
@@ -1368,7 +1408,12 @@ impl Game {
 
     /// A free passable tile adjacent to `tile` for spawning a produced unit.
     /// Deterministic: ascending tile-index order.
-    pub(crate) fn pick_spawn_tile(&self, tile: (u8, u8)) -> Option<(u8, u8)> {
+    pub(crate) fn pick_spawn_tile(
+        &self,
+        tile: (u8, u8),
+        utype: UnitType,
+        owner: Player,
+    ) -> Option<(u8, u8)> {
         let mut candidates: Vec<(u8, u8)> = NEIGHBOR_OFFSETS
             .iter()
             .filter_map(|&(dx, dy)| {
@@ -1385,11 +1430,12 @@ impl Game {
             })
             .collect();
         candidates.sort_by_key(|t| crate::map::tile_index(t.0, t.1));
-        candidates.into_iter().find(|&t| {
-            self.map.is_passable(t.0, t.1)
-                && self.building_at(t).is_none()
-                && self.unit_at(t).is_none()
-        })
+        // The spawn tile may already hold friendly units (units stack), as
+        // long as the tile has capacity for the new unit and no enemy/building
+        // occupies it.
+        candidates
+            .into_iter()
+            .find(|&t| self.map.is_passable(t.0, t.1) && self.can_occupy(t, utype, owner))
     }
 
     pub(crate) fn spawn_unit(

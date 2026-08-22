@@ -30,6 +30,21 @@ export const ZOOM_MAX = 96;
 /// Production building kinds that accept a rally point.
 const PRODUCER_KINDS = new Set(["Barracks", "Factory", "Airfield"]);
 
+/// Sub-tile offsets (as a fraction of a tile, 0..1) used to fan the sprites of
+/// units sharing one tile, so a stack visibly spreads instead of overlapping
+/// perfectly. Index 0 is the tile-center "primary" unit.
+const STACK_SLOTS: [number, number][] = [
+  [0.5, 0.5],
+  [0.3, 0.34],
+  [0.7, 0.34],
+  [0.3, 0.66],
+  [0.7, 0.66],
+  [0.5, 0.24],
+  [0.5, 0.76],
+  [0.18, 0.5],
+  [0.82, 0.5],
+];
+
 export class Camera {
   cx = 32; // World coordinate at top-left of viewport
   cy = 32;
@@ -313,8 +328,31 @@ export class Renderer {
       return a.id - b.id;
     });
 
+    // Assign each unit in a multi-unit tile a fan slot so the stack visibly
+    // spreads instead of perfectly overlapping.
+    const stackSlots = new Map<number, { idx: number; len: number }>();
+    {
+      const byTile = new Map<string, Entity[]>();
+      for (const e of world.entities.values()) {
+        if (!isUnit(e)) continue;
+        const key = `${Math.floor(e.x)},${Math.floor(e.y)}`;
+        let arr = byTile.get(key);
+        if (!arr) {
+          arr = [];
+          byTile.set(key, arr);
+        }
+        arr.push(e);
+      }
+      for (const arr of byTile.values()) {
+        if (arr.length < 2) continue;
+        arr.sort((a, b) => a.id - b.id);
+        arr.forEach((e, i) => stackSlots.set(e.id, { idx: i, len: arr.length }));
+      }
+    }
+
     for (const e of drawList) {
-      this.drawEntity(ctx, world, e, selection, w, h);
+      const slot = stackSlots.get(e.id);
+      this.drawEntity(ctx, world, e, selection, w, h, slot?.idx ?? 0, slot?.len ?? 1);
     }
 
     // 7c. Stacking badges (U12): when several units share a tile, the top
@@ -449,11 +487,20 @@ export class Renderer {
     selection: Set<number>,
     w: number,
     h: number,
+    stackIdx = 0,
+    stackLen = 1,
   ): void {
     const cam = this.camera;
-    const px = cam.screenX(e.x);
-    const py = cam.screenY(e.y);
     const z = cam.zoom;
+    let px = cam.screenX(e.x);
+    let py = cam.screenY(e.y);
+    // Fan the sprites of units sharing a tile so a stack reads as several
+    // units (offset is a fraction of a tile, always kept within it).
+    if (stackLen > 1) {
+      const slot = STACK_SLOTS[stackIdx % STACK_SLOTS.length];
+      px += (slot[0] - 0.5) * z;
+      py += (slot[1] - 0.5) * z;
+    }
     if (px < -z * 2 || py < -z * 2 || px > w + z * 2 || py > h + z * 2) return;
 
     let isStale = false;

@@ -370,6 +370,26 @@ pub const fn unit_stats(ut: UnitType) -> UnitStats {
     }
 }
 
+/// The maximum stacking "footprint" a single tile can hold. Infantry (size 1)
+/// can pile up, but vehicles consume more room: a tile holds several small
+/// units or a big one plus a weak escort. A single unit of any size always fits
+/// an empty tile; the capacity only bounds how much footprint can be *shared*
+/// among friendly units. Enemy-held tiles are never enterable.
+pub const TILE_STACK_CAPACITY: i32 = 4;
+
+/// How much of a tile's stacking capacity a unit type occupies. Larger, more
+/// powerful vehicles take more room; light/aircraft less.
+pub fn stack_size(ut: UnitType) -> i32 {
+    use UnitType::*;
+    match ut {
+        Infantry | Scout => 1,
+        RocketTrooper | Interceptor => 2,
+        Tank | Artillery | Gunship => 3,
+        SamLauncher => 4,
+        MammothTank => 5,
+    }
+}
+
 pub const fn building_stats(bt: BuildingType) -> BuildingStats {
     use BuildingType::*;
     match bt {

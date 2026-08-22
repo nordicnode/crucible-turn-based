@@ -721,6 +721,25 @@ function selectAt(sx: number, sy: number, additive: boolean): void {
 
   if (bestId != null) {
     if (!additive) selection = new Set();
+    // Selecting one unit in a stacked tile pulls in the whole stack, so a
+    // multi-unit tile can be commanded as a group.
+    if (!additive) {
+      const clicked = world.entities.get(bestId);
+      if (clicked && UNIT_KINDS.has(clicked.kind)) {
+        const stack = [...world.ownUnits].filter(
+          (u) =>
+            Math.floor(u.x) === Math.floor(clicked.x) &&
+            Math.floor(u.y) === Math.floor(clicked.y),
+        );
+        if (stack.length > 1) {
+          selection = new Set(stack.map((u) => u.id));
+          selectTile([tx, ty]);
+          lastPanelSig = "";
+          renderCommandSidebar();
+          return;
+        }
+      }
+    }
     selection.add(bestId);
     // Inspect the selected entity's tile.
     selectTile([tx, ty]);

@@ -27,9 +27,9 @@ pub const SEED: u64 = 12345;
 /// four-resource economy. `MoveGroup` still retargets blocked waypoints (e.g.
 /// the enemy HQ) to the nearest free adjacent tile, so the golden armies
 /// march out and fight instead of idling at their bases.
-pub const GOLDEN_10: u64 = 14786291323952942181;
-pub const GOLDEN_30: u64 = 3267209049933954020;
-pub const GOLDEN_60: u64 = 8315400457109348661;
+pub const GOLDEN_10: u64 = 1873514310713989713;
+pub const GOLDEN_30: u64 = 10709597720583819602;
+pub const GOLDEN_60: u64 = 12809750929348900437;
 
 pub fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;

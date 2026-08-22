@@ -631,3 +631,67 @@ fn rally_point_routes_newly_trained_units() {
         "trained unit should have begun routing toward the rally"
     );
 }
+
+#[test]
+fn units_stack_on_a_tile_up_to_capacity() {
+    let mut g = open_game(1000);
+    // Two infantry can coexist on one tile (capacity 8, size 1 each).
+    let a = spawn_unit(&mut g, Player::P0, UnitType::Infantry, (20, 20));
+    let b = spawn_unit(&mut g, Player::P0, UnitType::Infantry, (20, 21));
+    for u in g.units.iter_mut() {
+        if u.id == a || u.id == b {
+            u.mp = unit_stats(u.utype).mp;
+        }
+    }
+    // B moves onto A's tile; after resolution both occupy (20,20).
+    g.apply_commands(
+        Player::P0,
+        &[Command::MoveGroup {
+            player: Player::P0,
+            units: vec![b],
+            waypoint: (20, 20),
+        }],
+    );
+    g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+    g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    assert_eq!(g.unit(Player::P0, a).unwrap().tile, (20, 20));
+    assert_eq!(
+        g.unit(Player::P0, b).unwrap().tile,
+        (20, 20),
+        "a unit should be able to move onto a partially-filled tile"
+    );
+    assert_eq!(g.stack_used((20, 20)), 2);
+}
+
+#[test]
+fn units_cannot_overfill_a_tile() {
+    let mut g = open_game(1000);
+    // Fill (19,19) with 8 infantry (size 1 each = capacity 8).
+    let mut already: Vec<u32> = Vec::new();
+    for _ in 0..8 {
+        already.push(spawn_unit(&mut g, Player::P0, UnitType::Infantry, (19, 19)));
+    }
+    let mover = spawn_unit(&mut g, Player::P0, UnitType::Infantry, (21, 21));
+    for u in g.units.iter_mut() {
+        if already.contains(&u.id) || u.id == mover {
+            u.mp = unit_stats(u.utype).mp;
+        }
+    }
+    // The 9th infantry cannot enter the full tile.
+    g.apply_commands(
+        Player::P0,
+        &[Command::MoveGroup {
+            player: Player::P0,
+            units: vec![mover],
+            waypoint: (19, 19),
+        }],
+    );
+    g.apply_commands(Player::P0, &[Command::EndTurn { player: Player::P0 }]);
+    g.apply_commands(Player::P1, &[Command::EndTurn { player: Player::P1 }]);
+    assert_ne!(
+        g.unit(Player::P0, mover).unwrap().tile,
+        (19, 19),
+        "a tile at capacity must refuse another unit"
+    );
+    assert_eq!(g.stack_used((19, 19)), 8);
+}
