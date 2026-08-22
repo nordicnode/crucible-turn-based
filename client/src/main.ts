@@ -668,16 +668,29 @@ canvas.addEventListener("mouseup", (ev) => {
 function boxSelect(a: [number, number], b: [number, number]): void {
   const minX = Math.min(a[0], b[0]), maxX = Math.max(a[0], b[0]);
   const minY = Math.min(a[1], b[1]), maxY = Math.max(a[1], b[1]);
+  const hit: number[] = [];
   for (const e of world.ownUnits) {
     const sx = renderer.camera.screenX(e.x);
     const sy = renderer.camera.screenY(e.y);
-    if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) selection.add(e.id);
+    if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) hit.push(e.id);
   }
+  if (hit.length === 0) {
+    // Dragging an empty box deselects everything (a clear way to unselect).
+    clearSelection();
+    return;
+  }
+  // A box replaces the selection rather than piling onto it.
+  selection = new Set(hit);
+  selectedTile = null;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
+  lastPanelSig = "";
+  renderCommandSidebar();
 }
 
 function selectAt(sx: number, sy: number, additive: boolean): void {
   const [tx, ty] = tileAt(sx, sy);
-  selectTile([tx, ty]);
   let bestId: number | null = null;
   let bestDist = Infinity;
 
@@ -701,8 +714,12 @@ function selectAt(sx: number, sy: number, additive: boolean): void {
   if (bestId != null) {
     if (!additive) selection = new Set();
     selection.add(bestId);
+    // Inspect the selected entity's tile.
+    selectTile([tx, ty]);
   } else if (!additive) {
-    selection = new Set();
+    // A left-click on ground with nothing to pick fully deselects, so a
+    // selected unit/building/tile can always be cleared back to nothing.
+    clearSelection();
   }
   lastPanelSig = "";
   renderCommandSidebar();
