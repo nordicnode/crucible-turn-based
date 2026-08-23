@@ -12,8 +12,8 @@
     {
       "matchup": "hard>medium",
       "rate": {
-        "a_wins": 29,
-        "b_wins": 3,
+        "a_wins": 27,
+        "b_wins": 5,
         "draws": 0,
         "matches": 32
       }
@@ -23,8 +23,8 @@
     {
       "matchup": "tank>infantry",
       "rate": {
-        "a_wins": 63,
-        "b_wins": 1,
+        "a_wins": 62,
+        "b_wins": 2,
         "draws": 0,
         "matches": 64
       }
@@ -32,8 +32,8 @@
     {
       "matchup": "tank>artillery",
       "rate": {
-        "a_wins": 56,
-        "b_wins": 8,
+        "a_wins": 54,
+        "b_wins": 10,
         "draws": 0,
         "matches": 64
       }
@@ -41,8 +41,8 @@
     {
       "matchup": "artillery>infantry",
       "rate": {
-        "a_wins": 14,
-        "b_wins": 50,
+        "a_wins": 12,
+        "b_wins": 52,
         "draws": 0,
         "matches": 64
       }

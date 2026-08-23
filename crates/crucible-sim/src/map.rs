@@ -355,11 +355,13 @@ impl Map {
 
     /// Deterministic A* over the passable grid (8-dir, no corner cutting).
     /// Costs are in **movement points** (1 straight, 2 diagonal, terrain
-    /// multipliers applied) so the returned path length matches `Unit::mp`
-    /// budgeting directly. `blocked` is a dynamic overlay (buildings): a tile
-    /// is traversable iff it is passable terrain and not marked blocked.
-    /// `fly` (aircraft) skips the overlay entirely — they fly over buildings —
-    /// while still routing around impassable terrain.
+    /// multipliers applied). MP-optimal routing fans paths out so dense,
+    /// stacked armies spread instead of funneling onto identical straight
+    /// lines and jamming (a uniform step-cost route caused that). `blocked`
+    /// is a dynamic overlay (buildings): a tile is traversable iff it is
+    /// passable terrain and not marked blocked. `fly` (aircraft) skips the
+    /// overlay entirely — they fly over buildings — while still routing
+    /// around impassable terrain.
     pub fn find_path(
         &self,
         from: (u8, u8),
@@ -714,13 +716,13 @@ fn try_generate(seed: u64) -> Option<Map> {
 
     // Coherent landforms. Features are painted before the lanes and spawn
     // clearings, so the constraints can deliberately cut roads through them.
-    let mountains = (4 + rng.below(4) as usize) * MAP_SCALE as usize;
+    let mountains = (2 + rng.below(3) as usize) * MAP_SCALE as usize;
     for _ in 0..mountains {
         paint_mountain_chain(&mut terrain, &mut passable, &mut rng);
     }
-    let lakes = (2 + rng.below(3) as usize) * MAP_SCALE as usize;
+    let lakes = (1 + rng.below(2) as usize) * MAP_SCALE as usize;
     for _ in 0..lakes {
-        paint_irregular_blob(&mut terrain, &mut passable, &mut rng, Terrain::Water, 3, 6);
+        paint_irregular_blob(&mut terrain, &mut passable, &mut rng, Terrain::Water, 2, 4);
     }
     let rivers = 1 + rng.below(2) as usize;
     for _ in 0..rivers {
@@ -1083,7 +1085,7 @@ fn paint_mountain_chain(terrain: &mut [Terrain], passable: &mut [bool], rng: &mu
             rng.range(scaled(12) as i64, scaled(52) as i64) as i32,
         ),
     };
-    let steps = rng.range(scaled(22) as i64, scaled(38) as i64) as i32;
+    let steps = rng.range(scaled(14) as i64, scaled(26) as i64) as i32;
     let width = 1 + rng.below(2) as i32;
     // Heading in integer "direction units" (628 = full circle) so the whole
     // trajectory is pure integer arithmetic and stays byte-identical across
@@ -1175,8 +1177,10 @@ fn paint_mountain_chain(terrain: &mut [Terrain], passable: &mut [bool], rng: &mu
             branch_heading = heading + 90;
             branch_left = 7 + rng.below(5);
         }
-        // Paint the ridge spine; a narrow gate every so often forms passes.
-        let gate = step > 0 && step % 9 == 0 && branch_left == 0;
+        // Paint the ridge spine; a wide gate (two skipped steps) every so
+        // often forms easy passes, so ridges keep their tactical value as
+        // cover/choke points without ever acting as fortress walls.
+        let gate = step > 0 && (step % 5 == 4 || step % 5 == 0) && branch_left == 0;
         if !gate {
             for dy in -width..=width {
                 for dx in -width..=width {
