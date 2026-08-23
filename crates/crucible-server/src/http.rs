@@ -293,9 +293,9 @@ pub async fn autobattle(
             timeout_turns: 60,
             ..GameConfig::default()
         };
-        let mut ba = GenomeBot::new(wa);
-        let mut bb = GenomeBot::new(wb);
-        let (outcome, replay) = run_match_with_replay(seed, &cfg, &mut ba, &mut bb);
+        let mut bot_a = GenomeBot::new(wa);
+        let mut bot_b = GenomeBot::new(wb);
+        let (outcome, replay) = run_match_with_replay(seed, &cfg, &mut bot_a, &mut bot_b);
         let replay_json = replay.to_json();
         let replay_id = store
             .save_match(

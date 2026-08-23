@@ -2333,7 +2333,7 @@ interface ChampionInfo {
 
 async function initOpponentPicker(): Promise<void> {
   const championBtn = document.getElementById("champion-btn") as HTMLButtonElement | null;
-  const museumRow = el("museum-opps");
+  const museumRow = el("museum-opponents");
   try {
     const [champRes, museumRes] = await Promise.all([
       fetch("/api/champion"),

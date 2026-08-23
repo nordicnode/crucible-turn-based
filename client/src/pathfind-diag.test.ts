@@ -13,7 +13,7 @@ import { MAP_SIZE } from "./types";
 function flatWorld(): World {
   const n = MAP_SIZE * MAP_SIZE;
   const w = new World();
-  w.setMap(1, new Array(n).fill(true), new Array(n).fill("Plains"), [
+  w.setMap(1, Array(n).fill(true), Array(n).fill("Plains"), [
     [10, 10],
     [100, 100],
   ]);

@@ -43,7 +43,7 @@ All three share one **decision boundary**: everything inside `crucible-sim` stay
 
 ## 3. Architecture
 
-```
+```text
  ┌────────────────────────── CLIENT (browser) ──────────────────────────┐
  │  game canvas        lobby ("VS AI", Champion, Museum)               │
  │  localStorage: playerId (stable UUID), adaptive difficulty meter    │

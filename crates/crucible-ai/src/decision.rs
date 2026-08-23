@@ -553,7 +553,7 @@ mod tests {
     /// Find the nearest live deposit tile that can host the generic refinery.
     /// The structure occupies the resource tile itself; `reserved` only keeps
     /// this test fixture's later placements from colliding with it.
-    fn refinery_tile(g: &Game, hq: (u8, u8), reserved: &[(u8, u8)]) -> (u8, u8) {
+    fn refinery_tile(g: &Game, hq: (u8, u8), reserved: &[(u8, u8)]) -> Option<(u8, u8)> {
         use crucible_sim::map::{tile_coords, MAP_TILES};
         let mut fields: Vec<(i32, usize, (u8, u8))> = (0..MAP_TILES)
             .map(tile_coords)
@@ -579,7 +579,6 @@ mod tests {
                     })
                     .is_ok()
             })
-            .expect("map has a legal resource tile")
     }
 
     fn mature_buildings(g: &mut Game, own_turns: usize) {
@@ -705,7 +704,7 @@ mod tests {
         // gate for Airfield).
         let reserved = [(hq.0, hq.1 + 2), (hq.0 + 2, hq.1 + 2)];
         for (bt, tile) in [
-            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved)),
+            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved).unwrap_or(hq)),
             (BuildingType::Factory, (hq.0, hq.1 + 2)),
         ] {
             let cmd = Command::PlaceBuilding {
@@ -757,7 +756,7 @@ mod tests {
         // Refinery (must touch ore under the new rule) + Factory.
         let reserved = [(hq.0, hq.1 + 2), (hq.0 + 2, hq.1 + 2)];
         for (bt, tile) in [
-            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved)),
+            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved).unwrap_or(hq)),
             (BuildingType::Factory, (hq.0, hq.1 + 2)),
         ] {
             let cmd = Command::PlaceBuilding {

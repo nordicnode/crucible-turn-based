@@ -48,7 +48,7 @@ class MockCanvasContext {
   strokeRect(_x: number, _y: number, _w: number, _h: number): void {}
   arc(_x: number, _y: number, _r: number, _s: number, _e: number): void {}
   ellipse(_x: number, _y: number, _rx: number, _ry: number, _rot: number, _s: number, _e: number): void {}
-  quadraticCurveTo(_cpx: number, _cpy: number, _x: number, _y: number): void {}
+  quadraticCurveTo(_cpx: number, _copy: number, _x: number, _y: number): void {}
   roundRect(_x: number, _y: number, _w: number, _h: number, _r: number): void {}
   setLineDash(_segments: number[]): void {}
   createRadialGradient(_x0: number, _y0: number, _r0: number, _x1: number, _y1: number, _r1: number): CanvasGradient {

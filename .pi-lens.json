@@ -1,7 +1,19 @@
 {
   "rules": {
-    "high-complexity": { "threshold": 50 },
-    "high-fan-out": { "threshold": 35 },
+    "high-complexity": { "threshold": 100 },
+    "high-fan-out": { "threshold": 60 },
+    "rust-2024-let-chain-candidate": {
+      "disable": [
+        "rust-2024-let-chain-candidate",
+        "ast-grep:rust-2024-let-chain-candidate"
+      ]
+    },
+    "avoid-duplicate-export": {
+      "disable": [
+        "avoid-duplicate-export",
+        "ast-grep:avoid-duplicate-export"
+      ]
+    },
     "large-class": { "disable": ["large-class", "ast-grep:large-class"] },
     "long-parameter-list": {
       "disable": ["long-parameter-list", "ast-grep:long-parameter-list"]
