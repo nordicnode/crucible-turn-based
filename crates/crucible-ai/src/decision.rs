@@ -567,18 +567,15 @@ mod tests {
             })
             .collect();
         fields.sort_by_key(|&(distance, index, _)| (distance, index));
-        fields
-            .into_iter()
-            .map(|(_, _, t)| t)
-            .find(|&t| {
-                !reserved.contains(&t)
-                    && g.validate_command(&Command::PlaceBuilding {
-                        player: Player::P0,
-                        btype: BuildingType::Refinery,
-                        tile: t,
-                    })
-                    .is_ok()
-            })
+        fields.into_iter().map(|(_, _, t)| t).find(|&t| {
+            !reserved.contains(&t)
+                && g.validate_command(&Command::PlaceBuilding {
+                    player: Player::P0,
+                    btype: BuildingType::Refinery,
+                    tile: t,
+                })
+                .is_ok()
+        })
     }
 
     fn mature_buildings(g: &mut Game, own_turns: usize) {
@@ -704,7 +701,10 @@ mod tests {
         // gate for Airfield).
         let reserved = [(hq.0, hq.1 + 2), (hq.0 + 2, hq.1 + 2)];
         for (bt, tile) in [
-            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved).unwrap_or(hq)),
+            (
+                BuildingType::Refinery,
+                refinery_tile(&g, hq, &reserved).unwrap_or(hq),
+            ),
             (BuildingType::Factory, (hq.0, hq.1 + 2)),
         ] {
             let cmd = Command::PlaceBuilding {
@@ -756,7 +756,10 @@ mod tests {
         // Refinery (must touch ore under the new rule) + Factory.
         let reserved = [(hq.0, hq.1 + 2), (hq.0 + 2, hq.1 + 2)];
         for (bt, tile) in [
-            (BuildingType::Refinery, refinery_tile(&g, hq, &reserved).unwrap_or(hq)),
+            (
+                BuildingType::Refinery,
+                refinery_tile(&g, hq, &reserved).unwrap_or(hq),
+            ),
             (BuildingType::Factory, (hq.0, hq.1 + 2)),
         ] {
             let cmd = Command::PlaceBuilding {
