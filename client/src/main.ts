@@ -128,225 +128,250 @@ function tempLabel(t: number): string {
 
 function onServerMsg(msg: ServerMsg): void {
   switch (msg.type) {
-    case "matchStart": {
-      inGame = true;
-      // Discard any combat still queued from a previous match so stale attacks
-      // (resolved against the fresh match's unrelated entities) never replay.
-      combatQueue.length = 0;
-      nextAttackAt = 0;
-      world.setMap(
-        msg.mapSeed,
-        msg.passable,
-        msg.terrain ?? [],
-        msg.hq,
-        msg.terrainRules,
-        msg.elevation ?? [],
-        msg.moisture ?? [],
-        msg.temperature ?? [],
-      );
-      const ownHq = msg.hq[msg.player];
-      document.body.classList.add("in-match");
-      // Re-measure after the HUD claims its own layer; the camera and input
-      // surface must use the inset battlefield dimensions, not the window.
-      resize();
-      // Keep the player's HQ centered even when it spawns against a map edge;
-      // the command rail never covers the opening position.
-      renderer.camera.focusOn(
-        ownHq[0] + 0.5,
-        ownHq[1] + 0.5,
-        18,
-        canvas.width,
-        canvas.height,
-        true,
-      );
-      el("overlay").classList.add("hidden");
-      el("lobby").classList.add("hidden");
-      el("result").classList.add("hidden");
-      el("dashboard").classList.add("hidden");
-      el("spectate-list").classList.add("hidden");
-      document.body.classList.add("in-match");
-      el("sidebar").classList.remove("hidden");
-      el("topbar").classList.remove("hidden");
-      el("turn-ribbon").classList.remove("hidden");
-      el("radar-block").classList.remove("hidden");
-      el("log").classList.remove("hidden");
-      el("opponent").textContent = opponentLabel.toUpperCase();
-      unitWaypoints.clear();
-      prevEntityHp.clear();
-      selectedTile = null;
-      world.clearTileInspection();
-      lastInspectorSig = "";
-      renderTileInspector();
-      intel.clear();
-      intel.addEntry(0, "Tactical link active. Operation underway.", "info", "LINK");
-      lastRenderedLogCount = -1;
-      renderTurnIndicator();
+    case "matchStart":
+      handleMatchStart(msg);
       break;
-    }
-    case "stateDiff": {
-      // Detect combat / attacks by observing entity damage & positions
-      for (const e of msg.entities) {
-        const prevHp = prevEntityHp.get(e.id);
-        if (prevHp != null && e.hp < prevHp) {
-          // Floating damage number (U7)
-          const dmg = prevHp - e.hp;
-          const dmgColor = e.owner === 0 ? "#f87171" : "#fbbf24";
-          fx.spawnFloatingText(e.x, e.y, `-${dmg}`, dmgColor);
-          // Check for under-attack alert if friendly
-          intel.processUnderAttack(msg.turn, e);
-          // Impact sparks on the victim. The authoritative projectile + muzzle
-          // flash + shooter recoil are drawn from the server's `attacked`
-          // events below (the projectiles carry real attacker/target ids).
-          fx.spawnImpactSparks(e.x, e.y, e.owner === 0 ? "#f87171" : "#fb923c");
-        }
-        prevEntityHp.set(e.id, e.hp);
-      }
-
-      // Check for destroyed entities
-      for (const [id] of prevEntityHp) {
-        if (!msg.entities.some((e) => e.id === id)) {
-          const oldE = world.entities.get(id);
-          if (oldE) {
-            const angle = oldE.owner === 0 ? Math.PI / 4 : -3 * Math.PI / 4;
-            fx.spawnDeath(oldE.x, oldE.y, angle, oldE.kind, oldE.owner);
-            intel.processEntityDestroyed(msg.turn, oldE);
-          }
-          prevEntityHp.delete(id);
-        }
-      }
-
-      world.applyDiff(
-        msg.turn,
-        msg.activePlayer,
-        msg.ore,
-        msg.crystal ?? 0,
-        msg.research ?? { points: 0, researching: null, researched: [] },
-        msg.entities,
-        msg.oreTiles,
-        msg.crystalTiles ?? [],
-        msg.visible,
-        msg.events,
-        // Use the server's authoritative power numbers (the client's static
-        // table is only a fallback for menus/spectate).
-        { produced: msg.powerProduced ?? 0, consumed: msg.powerConsumed ?? 0 },
-        msg.steel ?? 0,
-        msg.coal ?? 0,
-        msg.resources,
-        msg.income,
-        msg.resourceTiles ?? [],
-        msg.actionsSpent,
-        msg.actionsCap,
-        msg.round,
-      );
-
-      renderTileInspector();
-
-      // The server is authoritative for durable routes. Keep the local map
-      // only as a transient optimistic hint until this diff arrives.
-      for (const e of msg.entities) {
-        if (e.owner !== 0 || !UNIT_KINDS.has(e.kind)) continue;
-        if (e.moveTarget) unitWaypoints.set(e.id, e.moveTarget);
-        else unitWaypoints.delete(e.id);
-      }
-
-      for (const ev of msg.events) {
-        intel.processDiffEvent(ev);
-        // Authoritative combat: buffer each attack so it can be replayed one at
-        // a time with camera focus (never all in a single frame), instead of
-        // spawning a pile of projectiles that are instantly missed.
-        if (ev.kind !== "attacked" || ev.attacker == null || ev.target == null) continue;
-        const attacker = world.entities.get(ev.attacker);
-        const target = world.entities.get(ev.target);
-        if (!attacker || !target) continue;
-        combatQueue.push({
-          attackerId: ev.attacker,
-          targetId: ev.target,
-          kind: combatAttackKind(attacker.kind),
-          // Friendly fire reads teal (you attacking), incoming fire orange.
-          color: attacker.owner === 0 ? "#9be8c9" : "#ffb35c",
-        });
-      }
-      renderTurnIndicator();
+    case "stateDiff":
+      handleStateDiff(msg);
       break;
-    }
-    case "matchEnd": {
-      inGame = false;
-      // Stop replaying the old match's combat once it's over; the next match
-      // starts clean (see matchStart).
-      combatQueue.length = 0;
-      nextAttackAt = 0;
-      world.result = { winner: msg.winner, reason: msg.reason };
-      lastReplayId = msg.replayId ?? null;
-      // F4: feed the adaptive-difficulty tracker (draws are neutral).
-      if (msg.winner != null) {
-        recordResult(opponentLabel, msg.winner === 0);
-      }
-      // A draw arrives with `winner: null`; it must not render as a defeat.
-      const title =
-        msg.winner === null ? "DRAW" : msg.winner === 0 ? "VICTORY" : "DEFEAT";
-      el("result-title").textContent = title;
-      el("result-title").className =
-        msg.winner === null ? "draw" : msg.winner === 0 ? "win" : "lose";
-      // Victory/defeat emblem (A8).
-      const emblem = el("result-emblem");
-      if (emblem) {
-        emblem.textContent = msg.winner === null ? "=" : msg.winner === 0 ? "\u2713" : "\u2717";
-        emblem.style.borderColor =
-          msg.winner === null ? "var(--gold)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
-        emblem.style.color =
-          msg.winner === null ? "var(--gold-bright)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
-        emblem.style.boxShadow =
-          msg.winner === null
-            ? "0 0 24px var(--gold-glow)"
-            : msg.winner === 0
-              ? "0 0 24px rgba(116,176,138,0.4)"
-              : "0 0 24px rgba(208,120,104,0.4)";
-      }
-      el("result-detail").textContent =
-        `${msg.reason} · ${formatTurns(msg.durationRounds ?? Math.ceil(msg.durationTurns / 2))} rounds · ${formatTurns(msg.durationTurns)} activations · replay #${msg.replayId ?? "?"}`;
-      // Plan §8: tell the player their match feeds the trainer's ghost pool.
-      el("result-ghost").textContent =
-        msg.replayId != null
-          ? "This match is now a training ghost — the AI will study it."
-          : "";
-      el("overlay").classList.remove("hidden");
-      el("lobby").classList.add("hidden");
-      el("result").classList.remove("hidden");
+    case "matchEnd":
+      handleMatchEnd(msg);
       break;
-    }
-    case "tileInspection": {
-      if (
-        selectedTile
-        && selectedTile[0] === msg.x
-        && selectedTile[1] === msg.y
-      ) {
-        world.applyTileInspection(msg);
-        lastInspectorSig = "";
-        renderTileInspector();
-      }
+    case "tileInspection":
+      handleTileInspection(msg);
       break;
-    }
-    case "commandRejected": {
-      intel.addEntry(world.turn, `Order rejected: ${msg.reason}`, "warn", "ORDER");
+    case "commandRejected":
+      handleCommandRejected(msg);
       break;
-    }
-    case "serverBusy": {
-      // Server is at its concurrent-match capacity: back to the lobby with a
-      // visible reason instead of silently hanging on a dead connection.
-      showLobby();
-      el("lobby-status").textContent =
-        "All tactical channels busy — try again in a moment.";
+    case "serverBusy":
+      handleServerBusy(msg);
       break;
-    }
     default: {
       // Every current ServerMsg variant is handled above; reaching the default
       // is a wire-format/protocol drift and must never be silently dropped.
-      // (The union is exhaustive today, so a new variant that forgets its case
-      // fails the `msg.type` assignment here rather than vanishing.)
+      // (The union is exhaustive today, so a new variant that forgets its
+      // case fails the `msg.type` assignment here rather than vanishing.)
       const unknown: never = msg;
       void unknown;
     }
   }
+}
+
+type MatchStartMsg = Extract<ServerMsg, { type: "matchStart" }>;
+type StateDiffMsg = Extract<ServerMsg, { type: "stateDiff" }>;
+type MatchEndMsg = Extract<ServerMsg, { type: "matchEnd" }>;
+type TileInspectionMsg = Extract<ServerMsg, { type: "tileInspection" }>;
+type CommandRejectedMsg = Extract<ServerMsg, { type: "commandRejected" }>;
+type ServerBusyMsg = Extract<ServerMsg, { type: "serverBusy" }>;
+
+function handleMatchStart(msg: MatchStartMsg): void {
+  inGame = true;
+  // Discard any combat still queued from a previous match so stale attacks
+  // (resolved against the fresh match's unrelated entities) never replay.
+  combatQueue.length = 0;
+  nextAttackAt = 0;
+  world.setMap(
+    msg.mapSeed,
+    msg.passable,
+    msg.terrain ?? [],
+    msg.hq,
+    msg.terrainRules,
+    msg.elevation ?? [],
+    msg.moisture ?? [],
+    msg.temperature ?? [],
+  );
+  const ownHq = msg.hq[msg.player];
+  document.body.classList.add("in-match");
+  // Re-measure after the HUD claims its own layer; the camera and input
+  // surface must use the inset battlefield dimensions, not the window.
+  resize();
+  // Keep the player's HQ centered even when it spawns against a map edge;
+  // the command rail never covers the opening position.
+  renderer.camera.focusOn(
+    ownHq[0] + 0.5,
+    ownHq[1] + 0.5,
+    18,
+    canvas.width,
+    canvas.height,
+    true,
+  );
+  el("overlay").classList.add("hidden");
+  el("lobby").classList.add("hidden");
+  el("result").classList.add("hidden");
+  el("dashboard").classList.add("hidden");
+  el("spectate-list").classList.add("hidden");
+  document.body.classList.add("in-match");
+  el("sidebar").classList.remove("hidden");
+  el("topbar").classList.remove("hidden");
+  el("turn-ribbon").classList.remove("hidden");
+  el("radar-block").classList.remove("hidden");
+  el("log").classList.remove("hidden");
+  el("opponent").textContent = opponentLabel.toUpperCase();
+  unitWaypoints.clear();
+  prevEntityHp.clear();
+  selectedTile = null;
+  world.clearTileInspection();
+  lastInspectorSig = "";
+  renderTileInspector();
+  intel.clear();
+  intel.addEntry(0, "Tactical link active. Operation underway.", "info", "LINK");
+  lastRenderedLogCount = -1;
+  renderTurnIndicator();
+}
+
+function handleStateDiff(msg: StateDiffMsg): void {
+  // Detect combat / attacks by observing entity damage & positions
+  for (const e of msg.entities) {
+    const prevHp = prevEntityHp.get(e.id);
+    if (prevHp != null && e.hp < prevHp) {
+      // Floating damage number (U7)
+      const dmg = prevHp - e.hp;
+      const dmgColor = e.owner === 0 ? "#f87171" : "#fbbf24";
+      fx.spawnFloatingText(e.x, e.y, `-${dmg}`, dmgColor);
+      // Check for under-attack alert if friendly
+      intel.processUnderAttack(msg.turn, e);
+      // Impact sparks on the victim. The authoritative projectile + muzzle
+      // flash + shooter recoil are drawn from the server's `attacked`
+      // events below (the projectiles carry real attacker/target ids).
+      fx.spawnImpactSparks(e.x, e.y, e.owner === 0 ? "#f87171" : "#fb923c");
+    }
+    prevEntityHp.set(e.id, e.hp);
+  }
+
+  // Check for destroyed entities
+  for (const [id] of prevEntityHp) {
+    if (!msg.entities.some((e) => e.id === id)) {
+      const oldE = world.entities.get(id);
+      if (oldE) {
+        const angle = oldE.owner === 0 ? Math.PI / 4 : -3 * Math.PI / 4;
+        fx.spawnDeath(oldE.x, oldE.y, angle, oldE.kind, oldE.owner);
+        intel.processEntityDestroyed(msg.turn, oldE);
+      }
+      prevEntityHp.delete(id);
+    }
+  }
+
+  world.applyDiff(
+    msg.turn,
+    msg.activePlayer,
+    msg.ore,
+    msg.crystal ?? 0,
+    msg.research ?? { points: 0, researching: null, researched: [] },
+    msg.entities,
+    msg.oreTiles,
+    msg.crystalTiles ?? [],
+    msg.visible,
+    msg.events,
+    // Use the server's authoritative power numbers (the client's static
+    // table is only a fallback for menus/spectate).
+    { produced: msg.powerProduced ?? 0, consumed: msg.powerConsumed ?? 0 },
+    msg.steel ?? 0,
+    msg.coal ?? 0,
+    msg.resources,
+    msg.income,
+    msg.resourceTiles ?? [],
+    msg.actionsSpent,
+    msg.actionsCap,
+    msg.round,
+  );
+
+  renderTileInspector();
+
+  // The server is authoritative for durable routes. Keep the local map
+  // only as a transient optimistic hint until this diff arrives.
+  for (const e of msg.entities) {
+    if (e.owner !== 0 || !UNIT_KINDS.has(e.kind)) continue;
+    if (e.moveTarget) unitWaypoints.set(e.id, e.moveTarget);
+    else unitWaypoints.delete(e.id);
+  }
+
+  for (const ev of msg.events) {
+    intel.processDiffEvent(ev);
+    // Authoritative combat: buffer each attack so it can be replayed one at
+    // a time with camera focus (never all in a single frame), instead of
+    // spawning a pile of projectiles that are instantly missed.
+    if (ev.kind !== "attacked" || ev.attacker == null || ev.target == null) continue;
+    const attacker = world.entities.get(ev.attacker);
+    const target = world.entities.get(ev.target);
+    if (!attacker || !target) continue;
+    combatQueue.push({
+      attackerId: ev.attacker,
+      targetId: ev.target,
+      kind: combatAttackKind(attacker.kind),
+      // Friendly fire reads teal (you attacking), incoming fire orange.
+      color: attacker.owner === 0 ? "#9be8c9" : "#ffb35c",
+    });
+  }
+  renderTurnIndicator();
+}
+
+function handleMatchEnd(msg: MatchEndMsg): void {
+  inGame = false;
+  // Stop replaying the old match's combat once it's over; the next match
+  // starts clean (see matchStart).
+  combatQueue.length = 0;
+  nextAttackAt = 0;
+  world.result = { winner: msg.winner, reason: msg.reason };
+  lastReplayId = msg.replayId ?? null;
+  // F4: feed the adaptive-difficulty tracker (draws are neutral).
+  if (msg.winner != null) {
+    recordResult(opponentLabel, msg.winner === 0);
+  }
+  // A draw arrives with `winner: null`; it must not render as a defeat.
+  const title =
+    msg.winner === null ? "DRAW" : msg.winner === 0 ? "VICTORY" : "DEFEAT";
+  el("result-title").textContent = title;
+  el("result-title").className =
+    msg.winner === null ? "draw" : msg.winner === 0 ? "win" : "lose";
+  // Victory/defeat emblem (A8).
+  const emblem = el("result-emblem");
+  if (emblem) {
+    emblem.textContent = msg.winner === null ? "=" : msg.winner === 0 ? "\u2713" : "\u2717";
+    emblem.style.borderColor =
+      msg.winner === null ? "var(--gold)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
+    emblem.style.color =
+      msg.winner === null ? "var(--gold-bright)" : msg.winner === 0 ? "var(--green)" : "var(--red)";
+    emblem.style.boxShadow =
+      msg.winner === null
+        ? "0 0 24px var(--gold-glow)"
+        : msg.winner === 0
+          ? "0 0 24px rgba(116,176,138,0.4)"
+          : "0 0 24px rgba(208,120,104,0.4)";
+  }
+  el("result-detail").textContent =
+    `${msg.reason} · ${formatTurns(msg.durationRounds ?? Math.ceil(msg.durationTurns / 2))} rounds · ${formatTurns(msg.durationTurns)} activations · replay #${msg.replayId ?? "?"}`;
+  // Plan §8: tell the player their match feeds the trainer's ghost pool.
+  el("result-ghost").textContent =
+    msg.replayId != null
+      ? "This match is now a training ghost — the AI will study it."
+      : "";
+  el("overlay").classList.remove("hidden");
+  el("lobby").classList.add("hidden");
+  el("result").classList.remove("hidden");
+}
+
+function handleTileInspection(msg: TileInspectionMsg): void {
+  if (
+    selectedTile
+    && selectedTile[0] === msg.x
+    && selectedTile[1] === msg.y
+  ) {
+    world.applyTileInspection(msg);
+    lastInspectorSig = "";
+    renderTileInspector();
+  }
+}
+
+function handleCommandRejected(msg: CommandRejectedMsg): void {
+  intel.addEntry(world.turn, `Order rejected: ${msg.reason}`, "warn", "ORDER");
+}
+
+function handleServerBusy(_msg: ServerBusyMsg): void {
+  // Server is at its concurrent-match capacity: back to the lobby with a
+  // visible reason instead of silently hanging on a dead connection.
+  showLobby();
+  el("lobby-status").textContent =
+    "All tactical channels busy — try again in a moment.";
 }
 
 // P0: a stable pseudo-anonymous player id (UUID) persisted locally, sent on
@@ -1526,115 +1551,132 @@ function renderCommandSidebar(): void {
     );
   }
 
-  if (activeTab === "buildings") {
-    const hasFactory = world.ownBuildings.some((b) => b.kind === "Factory");
-    const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
-    const buildings: BuildingType[] = [
-      "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory",
-      "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret",
-    ];
-    for (const b of buildings) {
-      // Tech tree: TechLab & Airfield need a Factory; Radar, TeslaCoil and
-      // the AATurret are the second tier and need the TechLab itself.
-      const needsFactory = b === "TechLab" || b === "Airfield";
-      const needsLab = b === "Radar" || b === "TeslaCoil" || b === "AATurret";
-      const isLocked = (needsFactory && !hasFactory) || (needsLab && !hasLab);
-      const reason = needsLab && !hasLab ? "REQUIRES TECH LAB" : needsFactory && !hasFactory ? "REQUIRES FACTORY" : undefined;
-      grid.appendChild(
-        cmdButton(
-          b,
-          BUILD_COSTS[b],
-          () => {
-            toolMode = null;
-            placementMode = placementMode === b ? null : b;
-            placementCursor = null;
-            lastPanelSig = "";
-            renderCommandSidebar();
-          },
-          {
-            armed: placementMode === b,
-            disabled: isLocked,
-            disabledReason: reason,
-          },
-        ),
-      );
-    }
-  } else if (activeTab === "troops") {
-    const barracks = world.ownBuildings.find((b) => b.kind === "Barracks");
-    const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
-    const troops: UnitType[] = ["Infantry", "Scout", "RocketTrooper"];
-    for (const t of troops) {
-      const needsTech = t === "RocketTrooper" && !hasRockets;
-      const isLocked = !barracks || needsTech;
-      const reason = needsTech ? "RESEARCH ROCKET PROPULSION" : !barracks ? "REQUIRES BARRACKS" : undefined;
-      grid.appendChild(
-        cmdButton(
-          t,
-          UNIT_COSTS[t],
-          () => {
-            if (barracks && !needsTech) {
-              sendCommands([trainUnit(barracks.id, t)]);
-            }
-          },
-          {
-            disabled: isLocked,
-            disabledReason: reason,
-          },
-        ),
-      );
-    }
-  } else if (activeTab === "vehicles") {
-    const factory = world.ownBuildings.find((b) => b.kind === "Factory");
-    const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
-    const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
-    const vehicles: UnitType[] = ["Tank", "Artillery", "MammothTank", "SamLauncher"];
-    for (const v of vehicles) {
-      const needsLab = v === "Artillery" || v === "MammothTank";
-      const needsTech = v === "SamLauncher" && !hasRockets;
-      const isLocked = !factory || (needsLab && !hasLab) || needsTech;
-      const reason = needsTech
-        ? "RESEARCH ROCKET PROPULSION"
-        : !factory
-          ? "REQUIRES FACTORY"
-          : needsLab && !hasLab
-            ? "REQUIRES TECH LAB"
-            : undefined;
-      grid.appendChild(
-        cmdButton(
-          v,
-          UNIT_COSTS[v],
-          () => {
-            if (factory && (!needsLab || hasLab) && !needsTech) {
-              sendCommands([trainUnit(factory.id, v)]);
-            }
-          },
-          {
-            disabled: isLocked,
-            disabledReason: reason,
-          },
-        ),
-      );
-    }
-  } else if (activeTab === "aircraft") {
-    const airfield = world.ownBuildings.find((b) => b.kind === "Airfield");
-    const aircraft: UnitType[] = ["Gunship", "Interceptor"];
-    for (const a of aircraft) {
-      grid.appendChild(
-        cmdButton(
-          a,
-          UNIT_COSTS[a],
-          () => {
-            if (airfield) {
-              sendCommands([trainUnit(airfield.id, a)]);
-            }
-          },
-          {
-            disabled: !airfield,
-            disabledReason: airfield ? undefined : "REQUIRES AIRFIELD",
-          },
-        ),
-      );
-    }
+  appendTabCommands(grid);
+}
+
+/** Command menu per active production tab, dispatched from
+ *  `renderCommandSidebar` so each tab's gate logic stays small. */
+function appendTabCommands(grid: HTMLElement): void {
+  if (activeTab === "buildings") appendBuildingsCommands(grid);
+  else if (activeTab === "troops") appendTroopsCommands(grid);
+  else if (activeTab === "vehicles") appendVehiclesCommands(grid);
+  else if (activeTab === "aircraft") appendAircraftCommands(grid);
+}
+
+function appendBuildingsCommands(grid: HTMLElement): void {
+  const hasFactory = world.ownBuildings.some((b) => b.kind === "Factory");
+  const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
+  const buildings: BuildingType[] = [
+    "PowerPlant", "Refinery", "CrystalRefinery", "Barracks", "Factory",
+    "TechLab", "Airfield", "Radar", "TeslaCoil", "Turret", "AATurret",
+  ];
+  for (const b of buildings) {
+    // Tech tree: TechLab & Airfield need a Factory; Radar, TeslaCoil and
+    // the AATurret are the second tier and need the TechLab itself.
+    const needsFactory = b === "TechLab" || b === "Airfield";
+    const needsLab = b === "Radar" || b === "TeslaCoil" || b === "AATurret";
+    const isLocked = (needsFactory && !hasFactory) || (needsLab && !hasLab);
+    const reason = needsLab && !hasLab ? "REQUIRES TECH LAB" : needsFactory && !hasFactory ? "REQUIRES FACTORY" : undefined;
+    grid.appendChild(
+      cmdButton(
+        b,
+        BUILD_COSTS[b],
+        () => {
+          toolMode = null;
+          placementMode = placementMode === b ? null : b;
+          placementCursor = null;
+          lastPanelSig = "";
+          renderCommandSidebar();
+        },
+        {
+          armed: placementMode === b,
+          disabled: isLocked,
+          disabledReason: reason,
+        },
+      ),
+    );
+  }
+}
+
+function appendTroopsCommands(grid: HTMLElement): void {
+  const barracks = world.ownBuildings.find((b) => b.kind === "Barracks");
+  const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
+  const troops: UnitType[] = ["Infantry", "Scout", "RocketTrooper"];
+  for (const t of troops) {
+    const needsTech = t === "RocketTrooper" && !hasRockets;
+    const isLocked = !barracks || needsTech;
+    const reason = needsTech ? "RESEARCH ROCKET PROPULSION" : !barracks ? "REQUIRES BARRACKS" : undefined;
+    grid.appendChild(
+      cmdButton(
+        t,
+        UNIT_COSTS[t],
+        () => {
+          if (barracks && !needsTech) {
+            sendCommands([trainUnit(barracks.id, t)]);
+          }
+        },
+        {
+          disabled: isLocked,
+          disabledReason: reason,
+        },
+      ),
+    );
+  }
+}
+
+function appendVehiclesCommands(grid: HTMLElement): void {
+  const factory = world.ownBuildings.find((b) => b.kind === "Factory");
+  const hasLab = world.ownBuildings.some((b) => b.kind === "TechLab");
+  const hasRockets = world.research.researched.includes("RocketPropulsion" as TechId);
+  const vehicles: UnitType[] = ["Tank", "Artillery", "MammothTank", "SamLauncher"];
+  for (const v of vehicles) {
+    const needsLab = v === "Artillery" || v === "MammothTank";
+    const needsTech = v === "SamLauncher" && !hasRockets;
+    const isLocked = !factory || (needsLab && !hasLab) || needsTech;
+    const reason = needsTech
+      ? "RESEARCH ROCKET PROPULSION"
+      : !factory
+        ? "REQUIRES FACTORY"
+        : needsLab && !hasLab
+          ? "REQUIRES TECH LAB"
+          : undefined;
+    grid.appendChild(
+      cmdButton(
+        v,
+        UNIT_COSTS[v],
+        () => {
+          if (factory && (!needsLab || hasLab) && !needsTech) {
+            sendCommands([trainUnit(factory.id, v)]);
+          }
+        },
+        {
+          disabled: isLocked,
+          disabledReason: reason,
+        },
+      ),
+    );
+  }
+}
+
+function appendAircraftCommands(grid: HTMLElement): void {
+  const airfield = world.ownBuildings.find((b) => b.kind === "Airfield");
+  const aircraft: UnitType[] = ["Gunship", "Interceptor"];
+  for (const a of aircraft) {
+    grid.appendChild(
+      cmdButton(
+        a,
+        UNIT_COSTS[a],
+        () => {
+          if (airfield) {
+            sendCommands([trainUnit(airfield.id, a)]);
+          }
+        },
+        {
+          disabled: !airfield,
+          disabledReason: airfield ? undefined : "REQUIRES AIRFIELD",
+        },
+      ),
+    );
   }
 }
 
@@ -2149,26 +2191,33 @@ function generateDemoTerrain(seed: number): { terrain: string[]; passable: boole
   };
   // A river channel across the middle with banks.
   const riverY = (x: number): number => MAP_SIZE / 2 + Math.round(Math.sin(x / 14) * 10);
+  // One tile's classification, extracted so the demo loops stay shallow.
+  const kindAt = (x: number, y: number): string => {
+    if (Math.abs(y - riverY(x)) <= 1) return "River";
+    const elev = noise(x, y, 0x11);
+    const moist = noise(x, y, 0x22);
+    const temp = 40 + (32 - Math.abs(y - 32)) * 5 + (hash(x, y, 0x33) % 40) - 20;
+    if (elev > 205) return "Mountain";
+    if (elev > 175 && moist < 140) return "Hills";
+    if (moist > 200 && temp > 130) return "Swamp";
+    if (moist < 70 && temp > 90) return "Desert";
+    if (moist > 150) return "Forest";
+    return "Plains";
+  };
   for (let y = 0; y < MAP_SIZE; y++) {
     for (let x = 0; x < MAP_SIZE; x++) {
       const idx = y * MAP_SIZE + x;
-      if (Math.abs(y - riverY(x)) <= 1) {
-        terrain[idx] = "River";
-        continue;
-      }
-      const elev = noise(x, y, 0x11);
-      const moist = noise(x, y, 0x22);
-      const temp = 40 + (32 - Math.abs(y - 32)) * 5 + (hash(x, y, 0x33) % 40) - 20;
-      if (elev > 205) terrain[idx] = "Mountain";
-      else if (elev > 175 && moist < 140) terrain[idx] = "Hills";
-      else if (moist > 200 && temp > 130) terrain[idx] = "Swamp";
-      else if (moist < 70 && temp > 90) terrain[idx] = "Desert";
-      else if (moist > 150) terrain[idx] = "Forest";
-      else terrain[idx] = "Plains";
-      passable[idx] = !["Mountain"].includes(terrain[idx]);
+      const kind = kindAt(x, y);
+      terrain[idx] = kind;
+      passable[idx] = kind !== "Mountain";
     }
   }
-  // Two lakes.
+  paintDemoLakes(terrain);
+  return { terrain, passable };
+}
+
+/** Two static lakes for the menu backdrop (kept flat). */
+function paintDemoLakes(terrain: string[]): void {
   for (let y = 16; y < 40; y++) {
     for (let x = 16; x < 40; x++) {
       if ((x - 28) ** 2 + (y - 28) ** 2 < 88) terrain[y * MAP_SIZE + x] = "Water";
@@ -2179,7 +2228,6 @@ function generateDemoTerrain(seed: number): { terrain: string[]; passable: boole
       if ((x - 105) ** 2 + (y - 102) ** 2 < 104) terrain[y * MAP_SIZE + x] = "Water";
     }
   }
-  return { terrain, passable };
 }
 
 function initMenuTour(): void {
