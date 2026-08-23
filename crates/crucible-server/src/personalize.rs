@@ -158,10 +158,9 @@ fn extract_fingerprint(replay: &Replay, human: Player) -> Fingerprint {
                 }
             }
             Command::StartResearch { .. } => tech = true,
-            Command::Attack { .. }
-                if first_attack.is_none() => {
-                    first_attack = Some(tc.round);
-                }
+            Command::Attack { .. } if first_attack.is_none() => {
+                first_attack = Some(tc.round);
+            }
             _ => {}
         }
     }
@@ -406,15 +405,21 @@ mod tests {
             (5, tr(UnitType::Infantry)),
             (6, tr(UnitType::Infantry)),
             (7, tr(UnitType::Tank)),
-            (12, Command::Attack {
-                player: Player::P0,
-                units: vec![1],
-                target: 9,
-            }),
-            (14, Command::StartResearch {
-                player: Player::P0,
-                tech: TechId::HighExplosive,
-            }),
+            (
+                12,
+                Command::Attack {
+                    player: Player::P0,
+                    units: vec![1],
+                    target: 9,
+                },
+            ),
+            (
+                14,
+                Command::StartResearch {
+                    player: Player::P0,
+                    tech: TechId::HighExplosive,
+                },
+            ),
         ]);
         let fp = extract_fingerprint(&replay, Player::P0);
         // Opening ramp: R > F > B then the infantry/other trains.
@@ -432,11 +437,14 @@ mod tests {
         let replay = replay_with(&[
             (2, pb(BuildingType::Refinery, 2, 0)),
             (5, tr(UnitType::Tank)),
-            (12, Command::Attack {
-                player: Player::P0,
-                units: vec![1],
-                target: 9,
-            }),
+            (
+                12,
+                Command::Attack {
+                    player: Player::P0,
+                    units: vec![1],
+                    target: 9,
+                },
+            ),
         ]);
         let fp = extract_fingerprint(&replay, Player::P0);
 
@@ -449,11 +457,16 @@ mod tests {
         // A later, later-attacking match keeps the earliest rush.
         let mut replay2 = replay.clone();
         replay2.commands.retain(|_t| false);
-        replay2.record_at(20, 39, Player::P0, Command::Attack {
-            player: Player::P0,
-            units: vec![1],
-            target: 9,
-        });
+        replay2.record_at(
+            20,
+            39,
+            Player::P0,
+            Command::Attack {
+                player: Player::P0,
+                units: vec![1],
+                target: 9,
+            },
+        );
         let fp2 = extract_fingerprint(&replay2, Player::P0);
         let p2 = update(p1.clone(), &fp2, "hard", Some(0.85), false);
         assert_eq!(p2.rush_attack["hard"], 12, "earliest rush is kept");

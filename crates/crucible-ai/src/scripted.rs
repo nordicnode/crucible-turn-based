@@ -1022,14 +1022,10 @@ impl Bot for AdaptiveBot {
         let committed = pol.committed_dist > 0
             && combat.iter().any(|&id| {
                 g.unit(p, id).is_some_and(|u| {
-                    chebyshev(u.tile.0, u.tile.1, objective.0, objective.1)
-                        <= pol.committed_dist
+                    chebyshev(u.tile.0, u.tile.1, objective.0, objective.1) <= pol.committed_dist
                 })
             });
-        if pol.march_threshold == 0
-            || combat.len() as i32 >= pol.march_threshold
-            || committed
-        {
+        if pol.march_threshold == 0 || combat.len() as i32 >= pol.march_threshold || committed {
             out.extend(army_orders(g, p, objective));
         }
 

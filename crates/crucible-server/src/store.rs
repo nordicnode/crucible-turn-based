@@ -316,7 +316,11 @@ impl Store {
     }
 
     /// Persist a player's strategy profile JSON (upsert).
-    pub fn save_player_profile(&self, player_id: &str, profile_json: &str) -> Result<(), rusqlite::Error> {
+    pub fn save_player_profile(
+        &self,
+        player_id: &str,
+        profile_json: &str,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
             "INSERT INTO player_profiles (player_id, profile_json, updated_at)
@@ -983,12 +987,13 @@ mod tests {
         store
             .save_player_profile("u1", r#"{"tempo":0.5,"recency_weight":0.7}"#)
             .unwrap();
-        let got = store.get_player_profile("u1").unwrap().expect("profile row");
+        let got = store
+            .get_player_profile("u1")
+            .unwrap()
+            .expect("profile row");
         assert!(got.contains("\"tempo\":0.5"));
         // Upsert replaces.
-        store
-            .save_player_profile("u1", r#"{"tempo":0.9}"#)
-            .unwrap();
+        store.save_player_profile("u1", r#"{"tempo":0.9}"#).unwrap();
         let updated = store.get_player_profile("u1").unwrap().unwrap();
         assert!(updated.contains("\"tempo\":0.9"));
     }

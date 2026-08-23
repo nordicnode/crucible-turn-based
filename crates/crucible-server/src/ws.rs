@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crucible_ai::{drive_bot_turn, adaptive, easy, hard, medium, Bot, GenomeBot};
+use crucible_ai::{adaptive, drive_bot_turn, easy, hard, medium, Bot, GenomeBot};
 use crucible_sim::{
     entity::{BuildingType, ResourceBundle, ResourceType},
     map::{tile_index, Terrain, MAP_SIZE, MAP_TILES},
@@ -364,8 +364,10 @@ async fn run(
         loop {
             match receiver.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    if let Ok(ClientMsg::JoinMatch { opponent, player_id }) =
-                        serde_json::from_str(&t)
+                    if let Ok(ClientMsg::JoinMatch {
+                        opponent,
+                        player_id,
+                    }) = serde_json::from_str(&t)
                     {
                         return Some((opponent, player_id));
                     }
