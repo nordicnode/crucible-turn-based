@@ -646,6 +646,46 @@
       .btn:disabled { opacity: 0.4; cursor: default; }
       .btn:disabled:hover { border-color: var(--line-hi); color: var(--ivory); box-shadow: none; }
 
+      /* Tooltip for the adaptive "vs AI" opponent */
+      .tooltip { position: relative; display: inline-flex; }
+      .tooltip-msg {
+        position: absolute;
+        bottom: calc(100% + 9px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: 250px;
+        background: rgba(10, 14, 20, 0.96);
+        border: 1px solid var(--line-hi);
+        border-radius: 4px;
+        padding: 9px 11px;
+        font-size: 10.5px;
+        line-height: 1.55;
+        color: var(--ivory);
+        text-align: left;
+        letter-spacing: 0;
+        font-weight: 400;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.12s ease, visibility 0.12s;
+        pointer-events: none;
+        z-index: 60;
+      }
+      .tooltip-msg::after {
+        content: "";
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 6px solid transparent;
+        border-top-color: var(--line-hi);
+      }
+      .tooltip:hover .tooltip-msg,
+      .tooltip:focus-within .tooltip-msg {
+        opacity: 1;
+        visibility: visible;
+      }
+
       /* --- Overlay / menu panels --- */
       #overlay {
         position: absolute;
@@ -1300,7 +1340,10 @@
         <p style="color:#cfc5ae; margin-bottom: 9px; font-size:11px; font-weight:700;">SELECT OPPONENT TO ENGAGE:</p>
         <p id="lobby-status" class="muted" style="min-height:1.1em; margin-top:-6px;"></p>
         <div class="row">
-          <button class="btn" id="adaptive-btn" style="border-color:var(--green); color:var(--green);">Adaptive AI</button>
+          <span class="tooltip">
+            <button class="btn" id="adaptive-btn" style="border-color:var(--green); color:var(--green);" aria-describedby="adaptive-tip">VS AI</button>
+            <span class="tooltip-msg" id="adaptive-tip" role="tooltip">A single commander that adapts to you. Each match it reads the same battlefield you see, picks a strategy (defensive, aggressive, or tech-heavy) that fits how you play, and scales its difficulty from your recent results. No preset opponents &mdash; one AI that grows with you.</span>
+          </span>
           <span id="lobby-tier" class="muted" style="align-self:center; font-size:11px;"></span>
         </div>
         <div class="row">
