@@ -656,9 +656,12 @@ export class Renderer {
     }
   }
 
-  /** A* over world tiles: cheapest path from `from` to `to` honoring
-   *  passability, terrain move multipliers, and enemy occupancy. Returns
-   *  the tile list (excluding the start) or null when unreachable. */
+  /** A* over world tiles, mirroring the server pathfinder's exact cost model
+   *  (Manhattan heuristic; orthogonal 1 MP, diagonal 2 MP, each times the
+   *  destination tile's terrain multiplier; diagonal corner-cutting
+   *  forbidden; all buildings of either side block ground routing). The
+   *  preview line therefore matches the route the server will actually walk.
+   *  Returns tiles excluding the start, or null when unreachable. */
   static pathfind(
     world: World,
     from: [number, number],
@@ -672,32 +675,28 @@ export class Renderer {
     const w = MAP;
     const h = MAP;
     const idx = (x: number, y: number) => y * w + x;
+    const ruleAt = (x: number, y: number) =>
+      world.terrainRules.get(world.terrain[idx(x, y)] ?? "Plains") ?? null;
     const blocked = (x: number, y: number): boolean => {
       if (x < 0 || y < 0 || x >= w || y >= h) return true;
-      const i = idx(x, y);
-      const rule = world.terrainRules.get(world.terrain[i]);
+      const rule = ruleAt(x, y);
       if (!rule || !rule.passable) return true;
-      // Enemy-held tiles are not routable through.
+      // Buildings of both sides block ground routing (mirrors the server's
+      // blocked_grid). Units do not: the server plans through units and only
+      // stops at them while walking, so blocking them here would draw a route
+      // the server never takes.
       for (const e of world.entities.values()) {
-        if (e.owner === 0) continue;
+        if (!BUILDING_KINDS.has(e.kind)) continue;
         if (Math.floor(e.x) === x && Math.floor(e.y) === y) return true;
       }
       return false;
     };
-    const cost = (x: number, y: number): number => {
-      const rule = world.terrainRules.get(world.terrain[idx(x, y)]);
-      return rule ? Math.max(1, rule.moveMultiplier) : 1;
-    };
-    const g = new Map<number, number>();
-    const came = new Map<number, number>();
     const startIdx = idx(from[0], from[1]);
     const goalIdx = idx(to[0], to[1]);
-    const heuristic = (i: number): number => {
-      const x = i % w;
-      const y = Math.floor(i / w);
-      return Math.max(Math.abs(x - to[0]), Math.abs(y - to[1]));
-    };
-    // Binary min-heap over (idx, f) so each pop is O(log V) instead of an
+    // Manhattan: admissible and consistent given diagonals cost 2 MP here.
+    const heuristic = (x: number, y: number): number =>
+      Math.abs(x - to[0]) + Math.abs(y - to[1]);
+    // Binary min-heap over f (g + h) so each pop is O(log V) instead of an
     // O(V) linear scan of an open-set map. Reachability hangs (hovering an
     // isolated island/lake) would otherwise cost ~40k * ~16k steps per frame.
     const heapIdx: number[] = [];
@@ -717,10 +716,12 @@ export class Renderer {
     const heapPop = (): number => {
       const top = heapIdx[0];
       const lastIdx = heapIdx[heapIdx.length - 1];
+      const lastF = heapF[heapF.length - 1];
       heapIdx.pop();
       heapF.pop();
       if (heapF.length > 0) {
         heapIdx[0] = lastIdx;
+        heapF[0] = lastF;
         let p = 0;
         for (;;) {
           const l = p * 2 + 1;
@@ -736,35 +737,55 @@ export class Renderer {
       }
       return top;
     };
+    const g = new Map<number, number>();
+    const came = new Map<number, number>();
     g.set(startIdx, 0);
-    heapPush(startIdx, heuristic(startIdx));
+    heapPush(startIdx, heuristic(from[0], from[1]));
     const closed = new Set<number>();
     let guard = 0;
+    let found = false;
     while (heapF.length > 0 && guard < 500_000) {
       guard += 1;
       const bestIdx = heapPop();
-      if (bestIdx === goalIdx) break;
+      if (bestIdx === goalIdx) {
+        found = true;
+        break;
+      }
       if (closed.has(bestIdx)) continue;
       closed.add(bestIdx);
       const bx = bestIdx % w;
       const by = Math.floor(bestIdx / w);
       const gBest = g.get(bestIdx);
       if (gBest === undefined) continue;
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+        [1, 1],
+        [1, -1],
+        [-1, 1],
+        [-1, -1],
+      ] as const) {
         const nx = bx + dx;
         const ny = by + dy;
         if (blocked(nx, ny)) continue;
+        const diag = dx !== 0 && dy !== 0;
+        if (diag) {
+          // No corner cutting: both orthogonal neighbors must be routable.
+          if (blocked(bx + dx, by) || blocked(bx, by + dy)) continue;
+        }
         const ni = idx(nx, ny);
-        const step = cost(nx, ny) * (dx !== 0 && dy !== 0 ? 1.4 : 1);
+        const step = (diag ? 2 : 1) * Math.max(1, ruleAt(nx, ny)?.moveMultiplier ?? 1);
         const ng = gBest + step;
         const known = g.get(ni);
         if (known !== undefined && known <= ng) continue;
         g.set(ni, ng);
         came.set(ni, bestIdx);
-        heapPush(ni, ng + heuristic(ni));
+        heapPush(ni, ng + heuristic(nx, ny));
       }
     }
-    const result: [number, number][] | null = came.has(goalIdx)
+    const result: [number, number][] | null = found
       ? (() => {
           const path: [number, number][] = [];
           let cur = goalIdx;
@@ -850,8 +871,8 @@ export class Renderer {
   }
 
   /** Movement-point cost of a path (used by the preview). Weights diagonal
-   *  steps ×1.4 exactly as the A* search does, so the shown MP matches the
-   *  path's computed cost instead of understating routes that step diagonally. */
+   *  steps ×2 exactly as the A* search (and the server's walk) do, so the
+   *  shown MP matches the route's real cost. */
   static pathCost(world: World, path: [number, number][]): number {
     let total = 0;
     let prev: [number, number] | null = null;
@@ -861,7 +882,7 @@ export class Renderer {
       if (prev) {
         const dx = Math.abs(tile[0] - prev[0]);
         const dy = Math.abs(tile[1] - prev[1]);
-        if (dx !== 0 && dy !== 0) step *= 1.4;
+        if (dx !== 0 && dy !== 0) step *= 2;
       }
       total += step;
       prev = tile;

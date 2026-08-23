@@ -623,7 +623,10 @@ canvas.addEventListener("mousedown", (ev) => {
     const target = enemyEntityAt(tx, ty);
     const units = selectedUnits();
     if (target && units.length > 0) {
-      sendCommands([attack(units, target.id)]);
+      // Attack stops the current march first (clearMove), then fires — so
+      // ordering an attack really halts the unit instead of the one-shot
+      // volley being drowned by a still-running move order.
+      sendCommands([clearMove(units), attack(units, target.id)]);
     } else {
       const producer = singleProducerSelected();
       if (producer != null) {
@@ -635,8 +638,8 @@ canvas.addEventListener("mousedown", (ev) => {
         issueMove([tx, ty]);
       }
     }
-    // Right-click also clears the current selection and tile inspector.
-    clearSelection();
+    // Intentionally keep the selection after a right-click order so the
+    // player can chain move/attack commands without re-selecting each time.
   }
 });
 
@@ -691,6 +694,15 @@ canvas.addEventListener("mouseup", (ev) => {
   dragCurrent = null;
 
   if (Math.hypot(sx - start[0], sy - start[1]) < 4) {
+    const [tx, ty] = tileAt(sx, sy);
+    const target = enemyEntityAt(tx, ty);
+    const units = selectedUnits();
+    if (target && units.length > 0) {
+      // Left-click on an enemy with a firing selection = attack (stop the
+      // march, then fire). Keeps the selection for chained orders.
+      sendCommands([clearMove(units), attack(units, target.id)]);
+      return;
+    }
     selectAt(sx, sy, ev.shiftKey);
   } else {
     boxSelect(start, [sx, sy]);
