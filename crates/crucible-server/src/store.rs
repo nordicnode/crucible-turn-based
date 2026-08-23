@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS matches (
@@ -193,6 +193,17 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
+/// A single (pseudo-anonymous) player and their aggregate match count.
+#[allow(dead_code)] // read by the L2 serving layer (P1)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerRecord {
+    pub id: String,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+    /// Matches played against the adaptive AI.
+    pub matches: u64,
+}
+
 impl Store {
     /// Open (or create) the database at `path` and run migrations.
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
@@ -252,6 +263,44 @@ impl Store {
         conn.query_row("SELECT replay FROM matches WHERE id = ?1", [id], |row| {
             row.get(0)
         })
+        .optional()
+    }
+
+    // --- Players (adaptive-opponent personalization) --------------------
+
+    /// Record that `player_id` played one more match, creating the row on
+    /// first sight. Best-effort aggregate (first/last seen + count); the
+    /// per-player strategy profile (P1) lives in a separate table.
+    pub fn note_player_match(&self, player_id: &str) -> Result<(), rusqlite::Error> {
+        let now = unix_now();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO players (id, first_seen_at, last_seen_at, matches)
+             VALUES (?1, ?2, ?2, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at,
+                matches = matches + 1",
+            rusqlite::params![player_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a player row by id, if present.
+    #[allow(dead_code)] // read by the L2 serving layer (P1)
+    pub fn get_player(&self, player_id: &str) -> Result<Option<PlayerRecord>, rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT id, first_seen_at, last_seen_at, matches FROM players WHERE id = ?1",
+            [player_id],
+            |r| {
+                Ok(PlayerRecord {
+                    id: r.get(0)?,
+                    first_seen_at: r.get(1)?,
+                    last_seen_at: r.get(2)?,
+                    matches: r.get::<_, i64>(3)? as u64,
+                })
+            },
+        )
         .optional()
     }
 
@@ -797,6 +846,14 @@ fn row_champion(
 const MIGRATION_V4: &str = "
 ALTER TABLE champions ADD COLUMN era TEXT;";
 
+const MIGRATION_V7: &str = "
+CREATE TABLE IF NOT EXISTS players (
+    id TEXT PRIMARY KEY,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    matches INTEGER NOT NULL DEFAULT 0
+);";
+
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version < 1 {
@@ -816,6 +873,9 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     if version < 6 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V6} COMMIT;"))?;
+    }
+    if version < 7 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V7} COMMIT;"))?;
     }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -853,6 +913,27 @@ mod tests {
         assert_eq!(store.latest_save().unwrap().unwrap().key, "save:2");
         store.delete_save("save:2").unwrap();
         assert_eq!(store.latest_save().unwrap().unwrap().key, "save:1");
+    }
+
+    #[test]
+    fn player_match_counter_is_upserted_per_id() {
+        let store = Store::in_memory().unwrap();
+        // Unknown id reads as absent.
+        assert!(store.get_player("u1").unwrap().is_none());
+
+        store.note_player_match("u1").unwrap();
+        store.note_player_match("u1").unwrap();
+        let p = store.get_player("u1").unwrap().expect("player row");
+        assert_eq!(p.id, "u1");
+        assert_eq!(p.matches, 2);
+        assert!(p.first_seen_at > 0);
+        assert!(p.last_seen_at >= p.first_seen_at);
+
+        // Players are independent.
+        store.note_player_match("u2").unwrap();
+        let p2 = store.get_player("u2").unwrap().expect("second player");
+        assert_eq!(p2.matches, 1);
+        assert_eq!(store.get_player("u1").unwrap().unwrap().matches, 2);
     }
 
     #[test]

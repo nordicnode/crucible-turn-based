@@ -55,6 +55,7 @@ enum ClientInput {
 enum ClientMsg {
     JoinMatch {
         opponent: String,
+        player_id: Option<String>,
     },
     Commands {
         cmds: Vec<Command>,
@@ -359,12 +360,14 @@ async fn run(
 
     // Wait for JoinMatch, with a deadline: a connection that never greets
     // would otherwise squat on its socket (and file descriptor) forever.
-    let mut opponent = match tokio::time::timeout(Duration::from_secs(10), async {
+    let (mut opponent, player_id) = match tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match receiver.next().await {
                 Some(Ok(Message::Text(t))) => {
-                    if let Ok(ClientMsg::JoinMatch { opponent }) = serde_json::from_str(&t) {
-                        return Some(opponent);
+                    if let Ok(ClientMsg::JoinMatch { opponent, player_id }) =
+                        serde_json::from_str(&t)
+                    {
+                        return Some((opponent, player_id));
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => return None,
@@ -374,7 +377,7 @@ async fn run(
     })
     .await
     {
-        Ok(Some(opponent)) => opponent,
+        Ok(Some((opponent, player_id))) => (opponent, player_id),
         Ok(None) => return Ok(()), // client closed before joining
         Err(_) => {
             tracing::debug!("ws session timed out waiting for JoinMatch");
@@ -658,6 +661,9 @@ async fn run(
                 save_live(&state, seed, &opponent, &game, &replay).await;
             }
             save_replay(&state, seed, &opponent, &game, &replay, None).await;
+            if let Some(pid) = player_id.as_deref() {
+                crate::personalize::record_match(&state.store, pid);
+            }
             return Err(e);
         }
     };
@@ -666,6 +672,9 @@ async fn run(
     // the client. A failing final send (client already gone) is not fatal.
     replay.result = Some(result.clone());
     let replay_id = save_replay(&state, seed, &opponent, &game, &replay, Some(&result)).await;
+    if let Some(pid) = player_id.as_deref() {
+        crate::personalize::record_match(&state.store, pid);
+    }
     let _ = sender
         .send(Message::Text(
             serde_json::to_string(&ServerMsg::MatchEnd(MatchEndMsg {

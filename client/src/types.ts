@@ -324,7 +324,7 @@ export type ServerMsg =
   | { type: "serverBusy" };
 
 export type ClientMsg =
-  | { type: "joinMatch"; opponent: string }
+  | { type: "joinMatch"; opponent: string; playerId: string }
   | { type: "commands"; cmds: Command[] }
   | { type: "inspectTile"; x: number; y: number }
   | { type: "endTurn" }

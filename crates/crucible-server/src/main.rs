@@ -5,6 +5,7 @@
 
 mod http;
 mod lifecycle;
+mod personalize;
 mod store;
 mod trainer;
 mod ws;

@@ -349,6 +349,22 @@ function onServerMsg(msg: ServerMsg): void {
   }
 }
 
+// P0: a stable pseudo-anonymous player id (UUID) persisted locally, sent on
+// every joinMatch so the server can learn per-player tendencies (P1+).
+function getOrCreatePlayerId(): string {
+  try {
+    let id = localStorage.getItem("crucible.playerId");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("crucible.playerId", id);
+    }
+    return id;
+  } catch {
+    // storage unavailable (private mode) — send a stable anon fallback
+    return "anon";
+  }
+}
+
 function startMatch(which: string, label?: string): void {
   inGame = false;
   opponentLabel = label ?? which;
@@ -363,7 +379,7 @@ function startMatch(which: string, label?: string): void {
   lastRenderedLogCount = -1;
   net.close();
   net.connect(onServerMsg, showLobby);
-  net.send({ type: "joinMatch", opponent: which });
+  net.send({ type: "joinMatch", opponent: which, playerId: getOrCreatePlayerId() });
 }
 
 function showLobby(): void {
