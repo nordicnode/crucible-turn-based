@@ -93,24 +93,24 @@ CREATE TABLE IF NOT EXISTS players (
 );
 ```
 
-### 4.2 New: `player_profiles` (L1 per-player model, stored as a compact JSON snapshot)
+### 4.2 New: `player_profiles` (L1 per-player model, stored as one JSON blob)
 
 ```sql
 CREATE TABLE IF NOT EXISTS player_profiles (
     player_id TEXT PRIMARY KEY REFERENCES players(id),
-    -- compact tendency fingerprints, updated after each match (§5.4)
-    opening_mix          TEXT NOT NULL DEFAULT '{}',  -- {build_order_key: weight}
-    unit_mix             TEXT NOT NULL DEFAULT '{}',  -- {unit_type: share_0to1}
-    rush_timing_offset   TEXT NOT NULL DEFAULT '{}',  -- {archetype: earliest_turn}
-    tempo                REAL NOT NULL DEFAULT 0.5,   -- combat strength by T30
-    tech_bias            REAL NOT NULL DEFAULT 0.5,   -- 0 none .. 1 tree-heavy
-    expansion_bias       REAL NOT NULL DEFAULT 0.5,   -- refinery aggression
-    vs_archetype         TEXT NOT NULL DEFAULT '{}',  -- {archetype: {wins,loses}}
-    recent_form          TEXT NOT NULL DEFAULT '[]',  -- last N (result, arch, diff)
-    recency_weight       REAL NOT NULL DEFAULT 0.7,   -- decay toward recent matches
-    updated_at           INTEGER NOT NULL
+    profile_json TEXT NOT NULL,   -- full PlayerProfile (serde JSON), see below
+    updated_at INTEGER NOT NULL
 );
 ```
+
+> **Implemented simplification (P1):** the field-by-field columns from the
+> original plan are collapsed into a single `profile_json` blob. The data is
+> identical; this keeps serialization trivial and deterministic. The Rust
+> `PlayerProfile` (in `personalize.rs`) is:
+> `{ opening_mix, unit_mix, rush_attack, tempo, tech_bias, expansion_bias,
+>   vs_archetype, recent_form, recency_weight }` — maps and vectors bounded,
+> scalars in 0..1. The `matches INTEGER` column in `players` doubles as the
+> P0 match counter.
 
 Rules: **no raw replay stored here** (that lives in `matches.replay`); the profile is a bounded append/decay summary so it cannot grow without bound. All arithmetic is deterministic (no RNG) so the model is reproducible from the same inputs.
 

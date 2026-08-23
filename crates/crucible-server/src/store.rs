@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS matches (
@@ -302,6 +302,31 @@ impl Store {
             },
         )
         .optional()
+    }
+
+    /// Load a player's stored strategy profile JSON, if present.
+    pub fn get_player_profile(&self, player_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT profile_json FROM player_profiles WHERE player_id = ?1",
+            [player_id],
+            |r| r.get(0),
+        )
+        .optional()
+    }
+
+    /// Persist a player's strategy profile JSON (upsert).
+    pub fn save_player_profile(&self, player_id: &str, profile_json: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO player_profiles (player_id, profile_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(player_id) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                updated_at = excluded.updated_at",
+            rusqlite::params![player_id, profile_json, unix_now()],
+        )?;
+        Ok(())
     }
 
     // --- Save / resume -----------------------------------------------------
@@ -854,6 +879,16 @@ CREATE TABLE IF NOT EXISTS players (
     matches INTEGER NOT NULL DEFAULT 0
 );";
 
+// P1: per-player strategy profile (adaptive-opponent learning). The whole
+// model is one bounded JSON blob so it stays trivially serializable and
+// deterministic; `updated_at` is bookkeeping only.
+const MIGRATION_V8: &str = "
+CREATE TABLE IF NOT EXISTS player_profiles (
+    player_id TEXT PRIMARY KEY REFERENCES players(id),
+    profile_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);";
+
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version < 1 {
@@ -876,6 +911,9 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     if version < 7 {
         conn.execute_batch(&format!("BEGIN; {MIGRATION_V7} COMMIT;"))?;
+    }
+    if version < 8 {
+        conn.execute_batch(&format!("BEGIN; {MIGRATION_V8} COMMIT;"))?;
     }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -934,6 +972,25 @@ mod tests {
         let p2 = store.get_player("u2").unwrap().expect("second player");
         assert_eq!(p2.matches, 1);
         assert_eq!(store.get_player("u1").unwrap().unwrap().matches, 2);
+    }
+
+    #[test]
+    fn player_profile_round_trip() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.get_player_profile("u1").unwrap().is_none());
+        // player_profiles has an FK to players; create the parent first.
+        store.note_player_match("u1").unwrap();
+        store
+            .save_player_profile("u1", r#"{"tempo":0.5,"recency_weight":0.7}"#)
+            .unwrap();
+        let got = store.get_player_profile("u1").unwrap().expect("profile row");
+        assert!(got.contains("\"tempo\":0.5"));
+        // Upsert replaces.
+        store
+            .save_player_profile("u1", r#"{"tempo":0.9}"#)
+            .unwrap();
+        let updated = store.get_player_profile("u1").unwrap().unwrap();
+        assert!(updated.contains("\"tempo\":0.9"));
     }
 
     #[test]

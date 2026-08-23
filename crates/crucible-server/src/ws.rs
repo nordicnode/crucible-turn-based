@@ -662,7 +662,7 @@ async fn run(
             }
             save_replay(&state, seed, &opponent, &game, &replay, None).await;
             if let Some(pid) = player_id.as_deref() {
-                crate::personalize::record_match(&state.store, pid);
+                crate::personalize::record_match(&state.store, pid, &replay, None, &opponent);
             }
             return Err(e);
         }
@@ -673,7 +673,7 @@ async fn run(
     replay.result = Some(result.clone());
     let replay_id = save_replay(&state, seed, &opponent, &game, &replay, Some(&result)).await;
     if let Some(pid) = player_id.as_deref() {
-        crate::personalize::record_match(&state.store, pid);
+        crate::personalize::record_match(&state.store, pid, &replay, result.winner, &opponent);
     }
     let _ = sender
         .send(Message::Text(

@@ -1059,3 +1059,15 @@ pub fn hard() -> AdaptiveBot {
 pub fn adaptive(difficulty: f32) -> AdaptiveBot {
     AdaptiveBot::new(difficulty)
 }
+
+/// The tier label for a difficulty scalar (mirrors `AdaptiveBot::name`'s
+/// bands). Shared so the server can tag served opponents consistently.
+pub fn tier_name(difficulty: f32) -> &'static str {
+    if difficulty >= D_HARD - 0.1 {
+        "hard"
+    } else if difficulty >= (D_MEDIUM + D_EASY) / 2.0 {
+        "medium"
+    } else {
+        "easy"
+    }
+}
