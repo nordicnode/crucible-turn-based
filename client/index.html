@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CRUCIBLE // Turn-Based Command</title>
+    <meta name="description" content="Turn-based tactical command strategy game against an evolving neural AI" />
+    <meta property="og:title" content="CRUCIBLE // Turn-Based Command" />
+    <meta property="og:description" content="Turn-based tactical command strategy game against an evolving neural AI" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="alternate icon" href="/favicon.ico" />
     <style>
@@ -720,15 +723,537 @@
       .menu-footer .footer-link:hover { color: var(--gold-bright); border-bottom-color: var(--gold); }
       .panel {
         background: var(--panel-strong);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
         border: 1px solid var(--line-hi);
-        border-radius: 5px;
-        padding: 16px 26px;
-        max-width: 470px;
+        border-radius: 6px;
+        padding: 18px 24px;
+        max-width: 480px;
         text-align: center;
-        box-shadow: 0 12px 34px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.88), inset 0 1px 0 rgba(255, 255, 255, 0.06);
       }
+
+      /* ===================================================================
+         CRUCIBLE BRIEFING DECK (Redesigned Strategic Command Splash Screen)
+         =================================================================== */
+      #lobby.briefing-deck {
+        max-width: 960px;
+        width: min(960px, calc(100vw - 32px));
+        max-height: calc(100vh - 36px);
+        overflow-y: auto;
+        padding: 24px 28px;
+        background: rgba(11, 15, 22, 0.94);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(201, 164, 92, 0.32);
+        border-radius: 6px;
+        box-shadow:
+          0 24px 60px rgba(0, 0, 0, 0.92),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08),
+          0 0 32px rgba(201, 164, 92, 0.08);
+        text-align: left;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        scrollbar-width: thin;
+        scrollbar-color: var(--line-hi) transparent;
+      }
+      #lobby.briefing-deck::before,
+      #lobby.briefing-deck::after {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        pointer-events: none;
+      }
+      #lobby.briefing-deck::before {
+        top: -1px;
+        left: -1px;
+        border-top: 2px solid var(--gold-bright);
+        border-left: 2px solid var(--gold-bright);
+      }
+      #lobby.briefing-deck::after {
+        bottom: -1px;
+        right: -1px;
+        border-bottom: 2px solid var(--gold-bright);
+        border-right: 2px solid var(--gold-bright);
+      }
+
+      /* Deck Status Telemetry Ribbon */
+      .deck-status-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--line);
+        font-family: var(--sans);
+        font-size: 10.5px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--green);
+        font-weight: 600;
+      }
+      .pulse-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 8px rgba(116, 176, 138, 0.7);
+        animation: pulseLive 2s infinite ease-in-out;
+      }
+      @keyframes pulseLive {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.45; transform: scale(0.85); }
+      }
+      .status-telemetry {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .status-telemetry .sep { color: var(--line-hi); }
+
+      /* Deck Hero Brand Header */
+      .deck-hero {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        padding: 4px 0 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .hero-crest {
+        width: 58px;
+        height: 58px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(201, 164, 92, 0.4);
+        border-radius: 4px;
+        background: rgba(20, 26, 36, 0.6);
+        box-shadow: inset 0 0 14px rgba(201, 164, 92, 0.12);
+      }
+      .hero-crest svg { width: 44px; height: 44px; display: block; }
+      .hero-text-block { flex: 1; min-width: 0; }
+      .hero-eyebrow {
+        font-size: 10px;
+        letter-spacing: 0.26em;
+        text-transform: uppercase;
+        color: var(--gold);
+        font-weight: 700;
+      }
+      .hero-title {
+        font-family: var(--serif);
+        font-size: clamp(2.1rem, 4.5vw, 2.7rem);
+        font-weight: 700;
+        letter-spacing: 0.24em;
+        color: var(--gold-bright);
+        line-height: 1.05;
+        margin: 4px 0 6px;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 16px var(--gold-glow);
+      }
+      .hero-tagline {
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: #cfc5ae;
+        max-width: 740px;
+        margin: 0;
+      }
+
+      /* Operations Matrix */
+      .operations-grid {
+        display: grid;
+        grid-template-columns: 1.18fr 0.82fr;
+        gap: 16px;
+        align-items: stretch;
+      }
+      @media (max-width: 800px) {
+        .operations-grid { grid-template-columns: 1fr; }
+      }
+
+      .op-card {
+        border-radius: 5px;
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      /* Featured Hero Mode (Adaptive AI) */
+      .op-card-featured {
+        background: linear-gradient(180deg, rgba(16, 28, 30, 0.9) 0%, rgba(11, 20, 24, 0.96) 100%);
+        border: 1.5px solid rgba(116, 176, 138, 0.45);
+        position: relative;
+        justify-content: space-between;
+      }
+      .op-card-featured:hover {
+        border-color: rgba(116, 176, 138, 0.7);
+        box-shadow: 0 0 24px rgba(116, 176, 138, 0.15);
+      }
+      .op-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .op-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 8px;
+        border-radius: 3px;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        background: rgba(15, 20, 28, 0.6);
+        border: 1px solid var(--line-hi);
+        color: var(--muted);
+      }
+      .op-badge-primary {
+        background: rgba(116, 176, 138, 0.14);
+        border-color: rgba(116, 176, 138, 0.5);
+        color: #9fe0b8;
+      }
+      .op-badge-gold {
+        background: rgba(201, 164, 92, 0.15);
+        border-color: rgba(201, 164, 92, 0.45);
+        color: var(--gold-bright);
+      }
+      .op-status-tag {
+        font-size: 9.5px;
+        font-family: var(--sans);
+        letter-spacing: 0.12em;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+
+      .op-card-body {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .op-title {
+        font-family: var(--serif);
+        font-size: 1.35rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: var(--ivory);
+        margin: 0;
+      }
+      .op-title-sm {
+        font-family: var(--serif);
+        font-size: 1.1rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: var(--gold-bright);
+        margin: 0;
+      }
+      .op-desc {
+        color: #cfc5ae;
+        font-size: 12.5px;
+        line-height: 1.55;
+        margin: 0;
+      }
+      .op-desc-sm {
+        color: #b7ada0;
+        font-size: 11.5px;
+        line-height: 1.45;
+        margin: 0;
+      }
+
+      .op-specs-row {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px;
+        background: rgba(9, 14, 18, 0.65);
+        border: 1px solid rgba(116, 176, 138, 0.25);
+        border-radius: 4px;
+        margin-top: 4px;
+      }
+      .spec-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 11px;
+      }
+      .spec-label {
+        color: var(--muted);
+        font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+      .spec-val {
+        color: var(--ivory);
+        font-weight: 600;
+      }
+      .tier-pill {
+        display: inline-block;
+        padding: 3px 9px;
+        border-radius: 3px;
+        background: rgba(116, 176, 138, 0.2);
+        border: 1px solid rgba(116, 176, 138, 0.6);
+        color: #b2ebd0;
+        font-weight: 700;
+        font-size: 10.5px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      /* Tactile Buttons */
+      .btn-hero-engage {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 13px 20px;
+        background: linear-gradient(180deg, #244234 0%, #152920 100%);
+        border: 1.5px solid #74b08a;
+        border-radius: 4px;
+        color: #ffffff;
+        font-family: var(--serif);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      }
+      .btn-hero-engage:hover {
+        background: linear-gradient(180deg, #2f5643 0%, #1c362b 100%);
+        border-color: #9fe0b8;
+        box-shadow: 0 0 20px rgba(116, 176, 138, 0.45);
+        color: #ffffff;
+      }
+      .btn-hero-lead { font-size: 13px; }
+      .btn-hero-sub {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        color: #b2ebd0;
+      }
+
+      /* Secondary Column Cards */
+      .op-secondary-col {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .op-card-secondary {
+        background: rgba(16, 21, 30, 0.88);
+        border: 1px solid var(--line-hi);
+      }
+      .op-card-champion {
+        border-color: rgba(201, 164, 92, 0.4);
+        background: linear-gradient(180deg, rgba(26, 22, 16, 0.85) 0%, rgba(15, 14, 12, 0.94) 100%);
+      }
+      .op-card-champion:hover {
+        border-color: var(--gold);
+        box-shadow: 0 0 18px rgba(201, 164, 92, 0.18);
+      }
+
+      .btn-champion {
+        width: 100%;
+        padding: 9px 14px;
+        background: linear-gradient(180deg, #372d1a 0%, #221a0d 100%);
+        border: 1px solid var(--gold);
+        color: var(--gold-bright);
+        font-family: var(--serif);
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        text-transform: uppercase;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+      .btn-champion:hover {
+        background: linear-gradient(180deg, #4f4124 0%, #2f2514 100%);
+        border-color: #f7dfa4;
+        color: #ffffff;
+        box-shadow: 0 0 14px var(--gold-glow);
+      }
+
+      .skirmish-btn-group {
+        display: flex;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .btn-skirmish {
+        flex: 1;
+        padding: 7px 4px;
+        background: #171d27;
+        border: 1px solid var(--line-hi);
+        color: var(--ivory);
+        font-family: var(--serif);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+        text-align: center;
+        text-transform: uppercase;
+      }
+      .btn-skirmish:hover {
+        border-color: var(--gold);
+        color: var(--gold-bright);
+        background: #242c3b;
+      }
+
+      .btn-resume {
+        width: 100%;
+        padding: 7px 12px;
+        background: #141923;
+        border: 1px solid var(--line);
+        color: #b7ada0;
+        font-family: var(--serif);
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+        text-transform: uppercase;
+      }
+      .btn-resume:hover {
+        border-color: var(--line-hi);
+        color: var(--ivory);
+        background: #1e2533;
+      }
+
+      /* Museum Archive Row */
+      .museum-section {
+        background: rgba(13, 17, 24, 0.75);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 12px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .museum-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .museum-title {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--gold);
+        font-family: var(--serif);
+      }
+      .museum-subtitle {
+        font-size: 10.5px;
+        color: var(--muted);
+      }
+      .museum-chips-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        min-height: 28px;
+      }
+      .btn-museum {
+        background: #151b26;
+        border: 1px solid var(--line-hi);
+        color: var(--ivory);
+        padding: 5px 11px;
+        border-radius: 3px;
+        font-family: var(--serif);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+      }
+      .btn-museum:hover {
+        border-color: var(--gold);
+        color: var(--gold-bright);
+        background: #202a3a;
+        box-shadow: 0 0 10px rgba(201, 164, 92, 0.2);
+      }
+      .btn-museum .chip-num { color: var(--gold-bright); font-weight: 700; }
+      .btn-museum .chip-gen { color: var(--muted); font-size: 10px; }
+      .museum-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+
+      /* Deck Command Footer */
+      .deck-bottom-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .bottom-tools-group {
+        display: flex;
+        gap: 8px;
+      }
+      .btn-deck-nav {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 13px;
+        background: rgba(22, 28, 38, 0.85);
+        border: 1px solid var(--line-hi);
+        color: var(--ivory);
+        font-family: var(--serif);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+      }
+      .btn-deck-nav:hover {
+        border-color: var(--gold);
+        color: var(--gold-bright);
+        background: rgba(36, 46, 62, 0.85);
+        box-shadow: 0 0 10px var(--gold-glow);
+      }
+      .btn-deck-nav svg { opacity: 0.85; }
+
+      .deck-status-msg {
+        color: var(--red);
+        font-size: 11px;
+        font-weight: 600;
+        min-height: 1.2em;
+      }
+      .deck-meta-info {
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+        text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .deck-meta-info .sep { color: var(--line-hi); }
+
+      /* Retained Legacy & Modal Layout Classes */
       .logo-box { margin-bottom: 10px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
       .crucible-emblem {
         margin: 0 auto 6px;
@@ -1327,35 +1852,160 @@
 
     <!-- Main Menu & Overlays -->
     <div id="overlay">
-      <div class="panel" id="lobby">
-        <div class="logo-box">
-          <div class="crucible-emblem" role="img" aria-label="Crucible tactical warfare simulation">
-            <span class="emblem-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 22 L12 10 L16 16 L20 6 L24 22 Z" fill="#c9a45c"/><path d="M8 22 L12 10 L16 16" fill="#e7ca8a" opacity="0.6"/></svg></span>
-            <span class="emblem-word">CRUCIBLE</span>
-            <span class="emblem-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 22 L12 10 L16 16 L20 6 L24 22 Z" fill="#c9a45c"/><path d="M8 22 L12 10 L16 16" fill="#e7ca8a" opacity="0.6"/></svg></span>
+      <!-- Strategic Command Briefing Deck (Splash Screen) -->
+      <div class="panel briefing-deck" id="lobby">
+        <!-- Telemetry Ribbon -->
+        <div class="deck-status-bar">
+          <div class="status-indicator">
+            <span class="pulse-dot"></span>
+            <span>SECURE COMBAT TERMINAL // SYSTEM ONLINE</span>
           </div>
-          <div class="logo-sub">Turn-Based Strategic Command</div>
+          <div class="status-telemetry">
+            <span>GRID: 128×128</span>
+            <span class="sep">/</span>
+            <span>SIMULATION: DETERMINISTIC</span>
+            <span class="sep">/</span>
+            <span>FOG OF WAR: ACTIVE</span>
+          </div>
         </div>
 
-        <p style="color:#cfc5ae; margin-bottom: 9px; font-size:11px; font-weight:700;">SELECT OPPONENT TO ENGAGE:</p>
-        <p id="lobby-status" class="muted" style="min-height:1.1em; margin-top:-6px;"></p>
-        <div class="row">
-          <span class="tooltip">
-            <button class="btn" id="adaptive-btn" style="border-color:var(--green); color:var(--green);" aria-describedby="adaptive-tip">VS AI</button>
-            <span class="tooltip-msg" id="adaptive-tip" role="tooltip">A single commander that adapts to you. Each match it reads the same battlefield you see, picks a strategy (defensive, aggressive, or tech-heavy) that fits how you play, and scales its difficulty from your recent results. No preset opponents &mdash; one AI that grows with you.</span>
-          </span>
-          <span id="lobby-tier" class="muted" style="align-self:center; font-size:11px;"></span>
+        <!-- Hero Brand Header -->
+        <div class="deck-hero">
+          <div class="hero-crest" aria-hidden="true">
+            <svg viewBox="0 0 48 48">
+              <polygon points="24,4 42,14 42,34 24,44 6,34 6,14" fill="none" stroke="#c9a45c" stroke-width="1.5" stroke-dasharray="3 2" opacity="0.6"/>
+              <polygon points="24,8 38,16 38,32 24,40 10,32 10,16" fill="rgba(201,164,92,0.08)" stroke="#e7ca8a" stroke-width="1.5"/>
+              <path d="M24 13 L30 22 L24 28 L18 22 Z" fill="#e7ca8a"/>
+              <line x1="24" y1="4" x2="24" y2="44" stroke="#c9a45c" stroke-width="1" opacity="0.4"/>
+              <line x1="6" y1="24" x2="42" y2="24" stroke="#c9a45c" stroke-width="1" opacity="0.4"/>
+              <circle cx="24" cy="24" r="3" fill="#0a0d13" stroke="#e7ca8a" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <div class="hero-text-block">
+            <div class="hero-eyebrow">TACTICAL WARFARE SIMULATION &amp; COMMAND SYSTEM</div>
+            <h1 class="hero-title">CRUCIBLE</h1>
+            <p class="hero-tagline">
+              Command combined-arms divisions across procedurally generated 128×128 terrain against an evolving neural intelligence. Establish forward operating bases, secure synthetic crystal nodes, construct supply chains, and eliminate enemy headquarters.
+            </p>
+          </div>
         </div>
-        <div class="row">
-          <button class="btn" id="champion-btn" data-opp="champion" data-label="the champion" style="border-color:var(--gold); color:var(--gold-bright);">Champion Neural Arena…</button>
+
+        <!-- Operations Matrix -->
+        <div class="operations-grid">
+          <!-- Featured Hero Directive: Adaptive Neural Commander -->
+          <div class="op-card op-card-featured" id="card-adaptive">
+            <div class="op-card-header">
+              <div class="op-badge op-badge-primary">
+                <span>⚡ PRIMARY DIRECTIVE</span>
+              </div>
+              <span class="op-status-tag">REACTIVE COMBAT ARCHETYPE</span>
+            </div>
+            <div class="op-card-body">
+              <h2 class="op-title">Adaptive Neural Commander</h2>
+              <p class="op-desc">
+                Engage a single evolving commander that reads the entire battlefield in real-time. It calibrates strategic archetypes (defensive fortifications, aggressive armored thrusts, or tech-heavy crystal expansion) and continuously scales tactical intensity based on your performance record.
+              </p>
+              <div class="op-specs-row">
+                <div class="spec-item">
+                  <span class="spec-label">DYNAMIC ANALYSIS:</span>
+                  <span class="spec-val">REAL-TIME TERRITORY READOUT</span>
+                </div>
+                <div class="spec-item">
+                  <span class="spec-label">CALIBRATED PROFILE:</span>
+                  <span id="lobby-tier" class="tier-pill">EVALUATING COMBAT RECORD...</span>
+                </div>
+              </div>
+            </div>
+            <div class="op-card-footer">
+              <button class="btn btn-hero-engage" id="adaptive-btn" title="Initiate deployment against the adaptive neural commander">
+                <span class="btn-hero-lead">ENGAGE ADAPTIVE AI</span>
+                <span class="btn-hero-sub">COMMENCE MISSION BRIEFING →</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Secondary Operations Column -->
+          <div class="op-secondary-col">
+            <!-- Apex Champion Arena Card -->
+            <div class="op-card op-card-secondary op-card-champion" id="card-champion">
+              <div class="op-card-header">
+                <div class="op-badge op-badge-gold">
+                  <span>👑 ARENA GAUNTLET</span>
+                </div>
+                <span class="op-status-tag">APEX SPECIMEN</span>
+              </div>
+              <div class="op-card-body">
+                <h3 class="op-title-sm">Apex Neural Champion</h3>
+                <p class="op-desc-sm">
+                  Challenge the reigning champion genome crowned through continuous automated self-play evolutionary tournaments.
+                </p>
+              </div>
+              <div class="op-card-footer">
+                <button class="btn btn-champion" id="champion-btn" data-opp="champion" data-label="the champion">
+                  CHAMPION (CONNECTING...)
+                </button>
+              </div>
+            </div>
+
+            <!-- Doctrinal Skirmish Drills Card -->
+            <div class="op-card op-card-secondary" id="card-skirmish">
+              <div class="op-card-header">
+                <div class="op-badge">
+                  <span>⚔ DOCTRINE DRILLS</span>
+                </div>
+                <span class="op-status-tag">FIXED THRESHOLDS</span>
+              </div>
+              <div class="op-card-body">
+                <h3 class="op-title-sm">Tactical Skirmish</h3>
+                <p class="op-desc-sm">
+                  Calibrated combat exercises for doctrine validation, unit composition drills, and base expansion testing.
+                </p>
+                <div class="skirmish-btn-group">
+                  <button class="btn btn-skirmish" data-opp="easy" data-label="RECON DETACHMENT">RECON (EASY)</button>
+                  <button class="btn btn-skirmish" data-opp="medium" data-label="TACTICAL BATTALION">TACTICAL (MED)</button>
+                  <button class="btn btn-skirmish" data-opp="hard" data-label="VETERAN DIVISION">VETERAN (HARD)</button>
+                </div>
+              </div>
+              <div class="op-card-footer">
+                <button class="btn btn-resume" id="resume-btn" data-opp="saved" data-label="saved match">
+                  RESUME SAVED SESSION
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="row">
-          <button class="btn" id="resume-btn" data-opp="saved" data-label="saved match">Resume Saved Match</button>
+
+        <!-- Decommissioned Champions / Museum Archive Section -->
+        <div class="museum-section" id="museum-container">
+          <div class="museum-header">
+            <div class="museum-title">
+              <span>🏛 HISTORICAL APEX SPECIMENS // DECOMMISSIONED CHAMPIONS</span>
+            </div>
+            <span class="museum-subtitle">Previous tournament victors preserved for benchmark engagements</span>
+          </div>
+          <div class="museum-chips-row" id="museum-opponents">
+            <span class="muted">Scanning neural archives...</span>
+          </div>
         </div>
-        <div class="row" id="museum-opponents"></div>
-        <div class="row" style="margin-top:12px; border-top:1px solid var(--line); padding-top:9px;">
-          <button class="btn" id="open-dashboard">Dashboard &amp; Lineage</button>
-          <button class="btn" id="open-spectate">Replay Archives</button>
+
+        <!-- Deck Command Bar (Intelligence & Replays) -->
+        <div class="deck-bottom-bar">
+          <div class="bottom-tools-group">
+            <button class="btn btn-deck-nav" id="open-dashboard" title="View genetic lineage, Elo ratings, and trainer metrics">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><path d="M2 11h2v3H2zm3-4h2v7H5zm3-5h2v12H8zm3 3h2v9h-2z"/></svg>
+              <span>COMBAT INTELLIGENCE</span>
+            </button>
+            <button class="btn btn-deck-nav" id="open-spectate" title="Inspect deterministic combat replay records">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><path d="M3 2v12l10-6z"/></svg>
+              <span>REPLAY ARCHIVES</span>
+            </button>
+          </div>
+          <div id="lobby-status" class="deck-status-msg"></div>
+          <div class="deck-meta-info">
+            <span>TACTICAL OS v0.1.0</span>
+            <span class="sep">·</span>
+            <span>DETERMINISTIC SIMULATION</span>
+          </div>
         </div>
       </div>
 
@@ -1394,7 +2044,7 @@
         <div class="row"><button class="btn" id="spectate-list-back">Return to Briefing</button></div>
       </div>
 
-      <div class="menu-footer"><span class="footer-inner">Created by <span class="footer-name">Mikey</span> · Built with <a class="footer-link" href="https://freebuff.com/" target="_blank" rel="noopener noreferrer">Freebuff</a></span></div>
+      <div class="menu-footer"><span class="footer-inner">CRUCIBLE TACTICAL SIMULATION // AUTHORITATIVE ENGINE // HIGH COMMAND DIRECTIVE</span></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

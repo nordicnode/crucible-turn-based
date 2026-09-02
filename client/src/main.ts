@@ -415,7 +415,7 @@ function showLobby(): void {
   el("result").classList.add("hidden");
   const tierHint = el("lobby-tier");
   if (tierHint) {
-    tierHint.textContent = `Recommended: ${adaptiveTier().toUpperCase()} (from your recent results)`;
+    tierHint.textContent = `PROFILE: ${adaptiveTier().toUpperCase()} (RECOMMENDED)`;
   }
   document.body.classList.remove("in-match");
   el("sidebar").classList.add("hidden");
@@ -1309,11 +1309,11 @@ function cmdButton(
       if (stats.hp) parts.push(`${stats.hp} HP`);
       if (stats.damage) parts.push(`${stats.damage} DMG`);
       if (stats.range_tiles) parts.push(`R${stats.range_tiles}`);
-      if (stats.mp) parts.push(`${stats.mp} MP`);
+      if ("mp" in stats && stats.mp) parts.push(`${stats.mp} MP`);
       if (stats.vision_tiles) parts.push(`${stats.vision_tiles} vis`);
       if (stats.build_time_turns) parts.push(`${stats.build_time_turns} Turn${stats.build_time_turns === 1 ? "" : "s"}`);
-      if (stats.air) parts.push("AIR");
-      if (stats.aa) parts.push("AA");
+      if ("air" in stats && stats.air) parts.push("AIR");
+      if ("aa" in stats && stats.aa) parts.push("AA");
       b.title = parts.join(" · ");
     }
   }
@@ -2382,6 +2382,10 @@ interface ChampionInfo {
 async function initOpponentPicker(): Promise<void> {
   const championBtn = document.getElementById("champion-btn") as HTMLButtonElement | null;
   const museumRow = el("museum-opponents");
+  const tierHint = el("lobby-tier");
+  if (tierHint) {
+    tierHint.textContent = `PROFILE: ${adaptiveTier().toUpperCase()} (RECOMMENDED)`;
+  }
   try {
     const [champRes, museumRes] = await Promise.all([
       fetch("/api/champion"),
@@ -2394,7 +2398,7 @@ async function initOpponentPicker(): Promise<void> {
       if (champ.champion) {
         const c = champ.champion;
         const elo = c.elo == null ? "" : ` · ELO ${Math.round(c.elo)}`;
-        championBtn.textContent = `CHAMPION (GEN ${c.generation}${elo})`;
+        championBtn.textContent = `CHALLENGE APEX (GEN ${c.generation}${elo})`;
         championBtn.disabled = false;
       } else {
         championBtn.textContent = "CHAMPION (NONE CROWNED)";
@@ -2410,17 +2414,19 @@ async function initOpponentPicker(): Promise<void> {
       bosses.push(nonReigning[i]);
     }
     if (bosses.length > 0) {
-      const label = document.createElement("span");
-      label.className = "muted";
-      label.textContent = "MUSEUM ARCHIVES:";
-      museumRow.appendChild(label);
       for (const c of bosses) {
         const b = document.createElement("button");
-        b.className = "btn";
-        b.textContent = `#${c.genome_id} (GEN ${c.generation})`;
+        b.className = "btn btn-museum";
+        b.innerHTML = `<span class="chip-num">#${c.genome_id}</span><span class="chip-gen">GEN ${c.generation}</span>`;
+        b.title = `Challenge historical champion #${c.genome_id} from generation ${c.generation}`;
         b.addEventListener("click", () => startMatch(`museum:${c.genome_id}`, `CHAMPION #${c.genome_id}`));
         museumRow.appendChild(b);
       }
+    } else {
+      const empty = document.createElement("span");
+      empty.className = "museum-empty";
+      empty.textContent = "No retired champions in archive — current generation is reigning apex.";
+      museumRow.appendChild(empty);
     }
   } catch {
     if (championBtn) {
