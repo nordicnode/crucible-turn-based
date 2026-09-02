@@ -27,21 +27,21 @@ gets countered before you sit down again.
 
 ## Quick start
 
-You need a recent Rust toolchain (CI is pinned to 1.95.0), Node 20+, and a
-browser.
+You need Node.js 20+ and a browser.
 
 ```bash
-# 1. One-time setup: wasm target, bindings tool, client dependencies
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.127 --locked   # must match Cargo.lock
-(cd client && npm install)
+# 1. Install dependencies
+npm install
 
-# 2. Build the client (includes the wasm replay shim)
-(cd client && npm run build)
+# 2. Build client and server
+npm run build
 
-# 3. Run the server and play (`start` replaces an older local server on 8787)
-cargo run -p crucible-server -- start
-# open http://127.0.0.1:8787
+# 3. Run development server (with hot reload)
+npm run dev
+
+# Or run the production build
+npm start
+# open http://localhost:3000
 ```
 
 That gives you the full game against scripted bots. For a real, evolving
@@ -200,32 +200,23 @@ and `http://127.0.0.1:8787/api/champion` (current champion + Elo).
 
 ## For developers
 
-The workspace is pure-Rust simulation/AI crates plus a no-framework
-TypeScript client:
+The workspace is a TypeScript fullstack application:
 
 ```
-crates/
-  crucible-sim/          deterministic turn-based sim core (no IO)
-  crucible-ai/           neural commander + scripted bots
-  crucible-evo/          evolution, gauntlet, ghosts, Elo
-  crucible-server/       HTTP/WS + trainer + SQLite (the only impure crate)
-  crucible-client-wasm/  wasm-bindgen shim for replay spectate
-client/                  TypeScript + Vite + Canvas 2D
+client/                  TypeScript + Vite + Canvas 2D + Vitest
+server/                  Simulation logic, AI bot logic, and session store
+server.ts                HTTP and WebSocket server
 ```
-
-Only `crucible-server` touches the network, filesystem, clock, or threads; the
-client never implements game rules.
 
 ```bash
-# Full local check (the same sequence CI runs)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build -p crucible-sim -p crucible-ai -p crucible-evo -p crucible-client-wasm --target wasm32-unknown-unknown
-cargo test -p crucible-client-wasm --target wasm32-unknown-unknown   # native/wasm golden parity
-(cd client && npm test)
+# Typecheck
+npm run lint
+
+# Run unit tests
+npm test
+
+# Build production bundle
+npm run build
 ```
 
-CI (`.github/workflows/ci.yml`) enforces all of the above on every push and PR,
-including the native/wasm determinism golden-parity tests. Each crate keeps a
-`CONTRACT.md` documenting its invariants.
+CI (`.github/workflows/ci.yml`) runs typechecking, unit tests, and production build verification on every push and PR.

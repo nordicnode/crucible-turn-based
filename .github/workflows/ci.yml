@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
@@ -10,84 +10,30 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: ""
-  # Must match the wasm-bindgen crate version pinned in Cargo.lock — the
-  # generated bindings and the wasm test runner are CLI-version-locked to it.
-  WASM_BINDGEN_VERSION: "0.2.127"
-
 jobs:
-  rust:
-    name: Rust (fmt · clippy · tests · wasm parity)
+  build-and-test:
+    name: Build & Test (typecheck · unit tests · build)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        # Pinned to the developer's local toolchain so CI behavior is
-        # reproducible; bump both together when upgrading.
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: wasm32-unknown-unknown
-          components: clippy, rustfmt
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install wasm-bindgen-cli
-        uses: jetli/wasm-bindgen-action@v0.2.0
-        with:
-          version: ${{ env.WASM_BINDGEN_VERSION }}
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test --workspace
-        run: cargo test --workspace
-
-      - name: wasm golden parity (native-vs-wasm determinism)
-        run: cargo test -p crucible-client-wasm --target wasm32-unknown-unknown
-
-  client:
-    name: Client (typecheck · tests · build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: client/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - name: Install Rust toolchain (for wasm bindings)
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install wasm-bindgen-cli
-        uses: jetli/wasm-bindgen-action@v0.2.0
-        with:
-          version: ${{ env.WASM_BINDGEN_VERSION }}
-
-      - name: Install client dependencies
-        run: cd client && npm ci
-
-      - name: Generate wasm bindings
-        run: cd client && npm run wasm
+      - name: Install dependencies
+        run: npm ci
 
       - name: Typecheck
-        run: cd client && npm run typecheck
+        run: npm run lint
 
-      - name: Tests
-        run: cd client && npm test
+      - name: Unit tests
+        run: npm test
 
-      - name: Build
-        run: cd client && npm run build
+      - name: Build (client & server)
+        run: npm run build
+
